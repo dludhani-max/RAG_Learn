@@ -16,7 +16,13 @@ load_dotenv()
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = os.getenv("RAG_DATA_DIR", str(PROJECT_ROOT / "data"))
 VECTOR_STORE_DIR = os.getenv("RAG_VECTOR_STORE_DIR", str(Path(DATA_DIR) / "vector_store"))
-COLLECTION_NAME = os.getenv("RAG_COLLECTION_NAME", "learn_documents")
+
+# "learn_documents" (the notebook-era collection) holds 384-dim vectors from
+# all-MiniLM-L6-v2. Qwen3-Embedding-0.6B produces 1024-dim vectors, which is
+# a hard incompatibility for a ChromaDB collection (fixed embedding
+# dimension) -- so this pipeline uses a new collection name and re-ingests
+# from scratch rather than mixing dimensions or overwriting the old data.
+COLLECTION_NAME = os.getenv("RAG_COLLECTION_NAME", "learn_documents_v2")
 
 # --- Embedding & chunking ------------------------------------------------
 # Qwen3-Embedding-0.6B over the notebook's all-MiniLM-L6-v2: better MTEB

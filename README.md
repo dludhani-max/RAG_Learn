@@ -9,13 +9,14 @@ Status: under active development. This README is updated as each build phase lan
 
 ## Setup
 
-1. Install dependencies (uv-managed): `uv sync`
-2. Copy `.env.example` to `.env` and fill in your keys:
+1. Install the Tesseract OCR binary (used for image ingestion — `pytesseract` is just a wrapper around it, it does not bundle the binary): `brew install tesseract` on macOS. Without this, image files in `data/` will fail to load (each failure is caught per-file, so it won't crash ingestion, but images will silently contribute no content).
+2. Install Python dependencies (uv-managed): `uv sync`
+3. Copy `.env.example` to `.env` and fill in your keys:
    - `GROQ_API_KEY` — required. Used for generation and LLM-judge steps (grading, guardrails). Get one at https://console.groq.com/keys
    - `TAVILY_API_KEY` — required for the web-search fallback in the agentic retrieval flow. Get one at https://tavily.com
    - `LANGSMITH_API_KEY` — required for tracing and evaluation runs. Get one at https://smith.langchain.com
    - `OPENAI_API_KEY` / `GOOGLE_API_KEY` — optional, only needed if you switch providers later.
-3. `.env` is gitignored — never commit real keys. `.env.example` stays tracked with placeholders only.
+4. `.env` is gitignored — never commit real keys. `.env.example` stays tracked with placeholders only.
 
 ## Configuration
 
@@ -33,4 +34,18 @@ Notable defaults:
 
 ## Running
 
-(To be filled in as the Streamlit app and CLI entry point are built.)
+The core pipeline (ingestion -> chunking -> embedding -> vector store -> retrieval, no agentic
+orchestration yet) can be smoke-tested end-to-end:
+
+```
+uv run python3 app.py
+```
+
+This loads every supported file under `data/` (PDF, TXT, CSV, Excel, Word, JSON, and OCR'd images),
+chunks and embeds them, upserts into the ChromaDB collection at `data/vector_store`, and runs one
+sample retrieval query, printing the top matches with their similarity scores.
+
+Re-running it is safe — chunk ids are deterministic (hash of source path + chunk index), so
+re-ingesting the same files updates existing rows instead of duplicating them.
+
+The Streamlit UI and LangGraph agentic flow are not wired up yet (later phases).
