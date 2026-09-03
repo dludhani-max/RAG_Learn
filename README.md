@@ -17,6 +17,20 @@ Status: under active development. This README is updated as each build phase lan
    - `OPENAI_API_KEY` / `GOOGLE_API_KEY` — optional, only needed if you switch providers later.
 3. `.env` is gitignored — never commit real keys. `.env.example` stays tracked with placeholders only.
 
+## Configuration
+
+All pipeline settings (paths, embedding model, chunk size, retrieval/eval knobs) live in
+`src/rag_learn/config.py` and can be overridden via environment variables (see that file for the
+full list, e.g. `RAG_CHUNK_SIZE`, `RAG_TOP_K`). Nothing else in the codebase should hardcode these
+values — change them here.
+
+Notable defaults:
+- Embedding model: `Qwen/Qwen3-Embedding-0.6B` (free, local, ~1.5GB on first download) — chosen
+  over smaller/faster alternatives for better retrieval quality; swappable via `RAG_EMBEDDING_MODEL`
+  if ingestion throughput ever becomes the bottleneck (e.g. many concurrent users uploading large
+  document sets).
+- Chunk size/overlap: 1750/300 characters, sized to that model's larger context window.
+
 ## Running
 
 (To be filled in as the Streamlit app and CLI entry point are built.)
