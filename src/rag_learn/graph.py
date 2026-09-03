@@ -14,6 +14,7 @@ from langchain_tavily import TavilySearch
 from langgraph.graph import END, START, StateGraph
 
 from rag_learn import config
+from rag_learn.cache import QACache
 from rag_learn.embedding import EmbeddingPipeline
 from rag_learn.reranker import Reranker
 from rag_learn.search import Retriever
@@ -46,6 +47,7 @@ class GraphState(TypedDict):
     web_search_needed: bool
     retry_count: int
     sources: list[dict[str, Any]]
+    cache_hit: bool
 
 
 class _Clients:
@@ -57,17 +59,29 @@ class _Clients:
     _store: Optional[VectorStore] = None
     _retriever: Optional[Retriever] = None
     _reranker: Optional[Reranker] = None
+    _cache: Optional[QACache] = None
     _utility_llm: Optional[ChatGroq] = None
     _generation_llm: Optional[ChatGroq] = None
     _tavily: Optional[TavilySearch] = None
 
     @classmethod
+    def pipeline(cls) -> EmbeddingPipeline:
+        if cls._pipeline is None:
+            cls._pipeline = EmbeddingPipeline()
+        return cls._pipeline
+
+    @classmethod
     def retriever(cls) -> Retriever:
         if cls._retriever is None:
-            cls._pipeline = cls._pipeline or EmbeddingPipeline()
             cls._store = cls._store or VectorStore()
-            cls._retriever = Retriever(cls._store, cls._pipeline)
+            cls._retriever = Retriever(cls._store, cls.pipeline())
         return cls._retriever
+
+    @classmethod
+    def cache(cls) -> QACache:
+        if cls._cache is None:
+            cls._cache = QACache()
+        return cls._cache
 
     @classmethod
     def reranker(cls) -> Reranker:
@@ -95,6 +109,28 @@ class _Clients:
 
 
 # --- Nodes -----------------------------------------------------------------
+
+
+def check_cache(state: GraphState) -> dict[str, Any]:
+    """Semantic Q&A cache lookup -- if a close-enough question was already
+    answered (by anyone, cache is shared, not per-session), reuse that
+    answer instead of running retrieval/grading/generation again."""
+    embedding = _Clients.pipeline().model.encode([state["question"]])[0]
+    hit = _Clients.cache().lookup(state["question"], embedding)
+    if hit is None:
+        return {"cache_hit": False}
+
+    print(
+        f"[CACHE] Hit (similarity={hit['similarity']:.3f}) for '{state['question']}' "
+        f"~= cached '{hit['cached_question']}'"
+    )
+    return {"cache_hit": True, "generation": hit["generation"], "sources": hit["sources"]}
+
+
+def store_cache(state: GraphState) -> dict[str, Any]:
+    embedding = _Clients.pipeline().model.encode([state["original_question"]])[0]
+    _Clients.cache().store(state["original_question"], embedding, state["generation"], state["sources"])
+    return {}
 
 
 def retrieve(state: GraphState) -> dict[str, Any]:
@@ -207,6 +243,10 @@ def generate(state: GraphState) -> dict[str, Any]:
 # --- Routing -----------------------------------------------------------------
 
 
+def _route_after_cache_check(state: GraphState) -> str:
+    return "end" if state["cache_hit"] else "retrieve"
+
+
 def _route_after_grading(state: GraphState) -> str:
     if not state["web_search_needed"]:
         return "generate"
@@ -220,13 +260,18 @@ def _route_after_grading(state: GraphState) -> str:
 
 def build_graph(checkpointer=None):
     graph = StateGraph(GraphState)
+    graph.add_node("check_cache", check_cache)
     graph.add_node("retrieve", retrieve)
     graph.add_node("grade_documents", grade_documents)
     graph.add_node("transform_query", transform_query)
     graph.add_node("web_search", web_search)
     graph.add_node("generate", generate)
+    graph.add_node("store_cache", store_cache)
 
-    graph.add_edge(START, "retrieve")
+    graph.add_edge(START, "check_cache")
+    graph.add_conditional_edges(
+        "check_cache", _route_after_cache_check, {"end": END, "retrieve": "retrieve"}
+    )
     graph.add_edge("retrieve", "grade_documents")
     graph.add_conditional_edges(
         "grade_documents",
@@ -235,7 +280,8 @@ def build_graph(checkpointer=None):
     )
     graph.add_edge("transform_query", "retrieve")
     graph.add_edge("web_search", "generate")
-    graph.add_edge("generate", END)
+    graph.add_edge("generate", "store_cache")
+    graph.add_edge("store_cache", END)
 
     return graph.compile(checkpointer=checkpointer)
 
@@ -257,6 +303,7 @@ def run_query(question: str) -> dict[str, Any]:
         "web_search_needed": False,
         "retry_count": 0,
         "sources": [],
+        "cache_hit": False,
     }
     return _compiled_graph.invoke(initial_state)
 

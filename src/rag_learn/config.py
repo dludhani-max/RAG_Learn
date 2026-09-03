@@ -47,6 +47,13 @@ RERANK_MODEL = os.getenv("RAG_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 SCORE_THRESHOLD = float(os.getenv("RAG_SCORE_THRESHOLD", "0.3"))
 MAX_RETRIES = int(os.getenv("RAG_MAX_RETRIES", "2"))
 
+# --- Semantic Q&A cache ----------------------------------------------------
+# A high threshold: this is an exact-answer-reuse cache, not a retrieval
+# threshold, so a false-positive "hit" for a subtly different question
+# would silently return a wrong answer -- err strict.
+CACHE_COLLECTION_NAME = os.getenv("RAG_CACHE_COLLECTION_NAME", "qa_cache")
+CACHE_SIMILARITY_THRESHOLD = float(os.getenv("RAG_CACHE_SIMILARITY_THRESHOLD", "0.95"))
+
 # --- Generation / judge LLM ----------------------------------------------
 GROQ_MODEL_NAME = os.getenv("RAG_GROQ_MODEL_NAME", "qwen/qwen3.6-27b")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")

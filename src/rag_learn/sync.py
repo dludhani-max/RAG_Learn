@@ -285,6 +285,15 @@ def sync(data_dir: Optional[str] = None) -> dict[str, Any]:
     _save_json(MANIFEST_PATH, manifest)
     _save_json(PENDING_REVIEW_PATH, pending_review)
 
+    # Content actually changed (renames don't count -- same content, cached
+    # answers derived from it are still valid) -> the Q&A cache may now hold
+    # stale answers, so wipe it rather than risk serving one.
+    content_changed = summary["added"] or summary["updated"] or summary["removed"] or summary["auto_replaced"]
+    if content_changed:
+        from rag_learn.cache import QACache
+
+        QACache().clear()
+
     print(
         f"[SYNC] Done. added={len(summary['added'])} updated={len(summary['updated'])} "
         f"removed={len(summary['removed'])} renamed={len(summary['renamed'])} "

@@ -89,6 +89,23 @@ Grading and query-rewrite calls use `reasoning_effort="none"` on the Groq model 
 internal `<think>` reasoning output for these short structured tasks — cheaper and faster, since
 nothing reads that reasoning for a yes/no grade or a one-line rewrite.
 
+### Semantic Q&A cache
+
+The very first node in the graph is `check_cache`: it embeds the incoming question and checks it
+against a shared (not per-session) cache of past question→answer pairs. If a close-enough match is
+found (cosine similarity ≥ `RAG_CACHE_SIMILARITY_THRESHOLD`, default 0.95 — deliberately strict,
+since this reuses an answer wholesale rather than just influencing retrieval), the cached answer is
+returned immediately with zero retrieval/reranking/grading/generation cost. Paraphrased questions
+hit the cache too (verified: "What programming languages does Deepak know?" and "Which coding
+languages is Deepak familiar with?" matched at similarity 0.960). A successful `generate` always
+writes its answer back to the cache via a `store_cache` node.
+
+The cache is automatically wiped by `sync()` whenever the document set actually changes (add,
+update, remove, or an auto-replaced version — a rename alone doesn't, since the content is
+unchanged) — a stale cached answer being served silently would be worse than a cache miss, so
+invalidation is deliberately coarse (clear everything) rather than trying to track which cached
+answers depended on which source documents.
+
 If `LANGSMITH_API_KEY` is set in `.env`, every node in the graph is automatically traced — check
 the LangSmith dashboard (project `rag-learn`) to see the retrieve/grade/generate (and any
 retry/web-search) sequence for a given query. Tracing is a no-op with no visible effect if the key
