@@ -34,18 +34,37 @@ Notable defaults:
 
 ## Running
 
-The core pipeline (ingestion -> chunking -> embedding -> vector store -> retrieval, no agentic
-orchestration yet) can be smoke-tested end-to-end:
+The core pipeline (sync -> retrieval, no agentic orchestration yet) can be smoke-tested end-to-end:
 
 ```
 uv run python3 app.py
 ```
 
-This loads every supported file under `data/` (PDF, TXT, CSV, Excel, Word, JSON, and OCR'd images),
-chunks and embeds them, upserts into the ChromaDB collection at `data/vector_store`, and runs one
-sample retrieval query, printing the top matches with their similarity scores.
+This runs an incremental **sync** of every supported file under `data/` (PDF, TXT, CSV, Excel,
+Word, JSON, and OCR'd images) against the ChromaDB collection at `data/vector_store`, then runs
+one sample retrieval query, printing the top matches with their similarity scores.
 
-Re-running it is safe — chunk ids are deterministic (hash of source path + chunk index), so
-re-ingesting the same files updates existing rows instead of duplicating them.
+You can also run just the sync step directly: `uv run python3 -m rag_learn.sync`
+
+### How sync works
+
+Re-running ingestion is cheap and safe — a manifest (`data/vector_store/manifest.json`, gitignored)
+tracks each file's content hash, so unchanged files are skipped entirely rather than re-embedded.
+On each run:
+- **New file** → chunked, embedded, added.
+- **Unchanged file** → skipped (no re-embedding cost).
+- **Modified file** (content changed) → its old chunks are removed and it's re-ingested fresh.
+- **Deleted file** → its chunks are removed from the vector store.
+- **Renamed/moved file** (same content, new path) → detected automatically, just updates the
+  manifest — no re-embedding.
+- **A new file that looks like a version of an existing one** (e.g. `resume_v2.pdf` next to
+  `resume.pdf`, matched by filename similarity) → the old version is only ever auto-replaced when
+  there's a clear, unambiguous signal that the new one is more recent (a date in the filename, or
+  failing that, file modification time). Otherwise both are kept and the pair is logged to
+  `data/vector_store/pending_review.json` for you to review manually — nothing is silently deleted
+  on a guess.
+- Changing pipeline settings that affect chunk shape (`RAG_EMBEDDING_MODEL`, `RAG_CHUNK_SIZE`,
+  `RAG_CHUNK_OVERLAP`) or the loader logic itself invalidates the whole cache and triggers a full
+  re-sync, so old and new chunk formats never silently mix in the same collection.
 
 The Streamlit UI and LangGraph agentic flow are not wired up yet (later phases).

@@ -1,5 +1,6 @@
 import hashlib
 import os
+from collections import defaultdict
 from typing import Any, List
 
 import chromadb
@@ -50,12 +51,28 @@ class VectorStore:
     def count(self) -> int:
         return self.collection.count()
 
-    def add_documents(self, documents: List[Any], embeddings: np.ndarray):
+    def delete(self, ids: List[str]):
+        """Remove chunks by id -- used by sync.py to clear a file's old
+        chunks before re-adding it (modified file) or to drop them entirely
+        (deleted file)."""
+        if not ids:
+            return
+        self.collection.delete(ids=ids)
+        print(f"[INFO] Deleted {len(ids)} chunks. Vector store now has {self.collection.count()} documents")
+
+    def add_documents(self, documents: List[Any], embeddings: np.ndarray) -> List[str]:
         """Add documents and their embeddings to the vector store.
 
-        Uses a stable id (hash of source + chunk index) per chunk so
-        re-running ingestion on the same files updates existing rows
-        instead of duplicating them.
+        Uses a stable id (hash of source + the chunk's index *within its own
+        source file*) per chunk, so re-running ingestion on the same files
+        updates existing rows instead of duplicating them -- independent of
+        what other files happen to be in the same batch (chunk index is
+        computed per-source here, not as a position in the whole batch,
+        since a global batch index would shift for unrelated files whenever
+        the batch composition changes).
+
+        Returns the ids that were written, so callers (sync.py) can record
+        them for later deletion.
         """
         if len(documents) != len(embeddings):
             raise ValueError("Number of documents must match number of embeddings")
@@ -63,10 +80,13 @@ class VectorStore:
         print(f"[INFO] Adding {len(documents)} documents to vector store...")
 
         ids, metadatas, documents_text, embeddings_list = [], [], [], []
+        per_source_index: dict[str, int] = defaultdict(int)
 
-        for i, (doc, embedding) in enumerate(zip(documents, embeddings)):
+        for doc, embedding in zip(documents, embeddings):
             source = str(doc.metadata.get("source", doc.metadata.get("source_file", "")))
-            ids.append(_stable_id(source, i))
+            source_chunk_index = per_source_index[source]
+            per_source_index[source] += 1
+            ids.append(_stable_id(source, source_chunk_index))
 
             page = doc.metadata.get("page")
             try:
@@ -79,7 +99,7 @@ class VectorStore:
                     "source_file": str(doc.metadata.get("source_file", "")),
                     "file_type": str(doc.metadata.get("file_type", "")),
                     "page": page,
-                    "doc_index": i,
+                    "doc_index": source_chunk_index,
                     "content_length": len(doc.page_content),
                 }
             )
@@ -94,6 +114,7 @@ class VectorStore:
                 documents=documents_text,
             )
             print(f"[INFO] Vector store now has {self.collection.count()} documents")
+            return ids
         except Exception as e:
             print(f"[ERROR] Error adding documents to vector store: {e}")
             raise
