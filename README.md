@@ -67,4 +67,28 @@ On each run:
   `RAG_CHUNK_OVERLAP`) or the loader logic itself invalidates the whole cache and triggers a full
   re-sync, so old and new chunk formats never silently mix in the same collection.
 
-The Streamlit UI and LangGraph agentic flow are not wired up yet (later phases).
+### Agentic query flow (LangGraph)
+
+Once the vector store is populated, ask questions through the full Corrective/Adaptive RAG graph:
+
+```
+uv run python3 -m rag_learn.graph
+```
+
+Flow: `retrieve` → `grade_documents` (an LLM call judges which retrieved chunks are actually
+relevant) → if enough are relevant, `generate`; if not and retries remain, `transform_query`
+rewrites the question and loops back to `retrieve`; once retries are exhausted, `web_search`
+(Tavily) fills in with live web results before generating. Answers include a deduplicated source
+list (local file/page or web URL). Retry count is capped by `RAG_MAX_RETRIES` (default 2) so a
+bad query can't loop forever.
+
+Grading and query-rewrite calls use `reasoning_effort="none"` on the Groq model to skip its
+internal `<think>` reasoning output for these short structured tasks — cheaper and faster, since
+nothing reads that reasoning for a yes/no grade or a one-line rewrite.
+
+If `LANGSMITH_API_KEY` is set in `.env`, every node in the graph is automatically traced — check
+the LangSmith dashboard (project `rag-learn`) to see the retrieve/grade/generate (and any
+retry/web-search) sequence for a given query. Tracing is a no-op with no visible effect if the key
+isn't set.
+
+The Streamlit UI is not wired up yet (later phase).

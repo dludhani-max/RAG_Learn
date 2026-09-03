@@ -52,12 +52,20 @@ LANGSMITH_TRACING = os.getenv("LANGSMITH_TRACING", "false")
 LANGSMITH_PROJECT = os.getenv("LANGSMITH_PROJECT", "rag-learn")
 
 if LANGSMITH_API_KEY:
-    os.environ.setdefault("LANGSMITH_API_KEY", LANGSMITH_API_KEY)
-    os.environ.setdefault("LANGSMITH_TRACING", LANGSMITH_TRACING)
-    os.environ.setdefault("LANGSMITH_PROJECT", LANGSMITH_PROJECT)
-    os.environ.setdefault("LANGCHAIN_API_KEY", LANGSMITH_API_KEY)
-    os.environ.setdefault("LANGCHAIN_TRACING_V2", LANGSMITH_TRACING)
-    os.environ.setdefault("LANGCHAIN_PROJECT", LANGSMITH_PROJECT)
+    os.environ["LANGSMITH_API_KEY"] = LANGSMITH_API_KEY
+    os.environ["LANGSMITH_TRACING"] = LANGSMITH_TRACING
+    os.environ["LANGSMITH_PROJECT"] = LANGSMITH_PROJECT
+    os.environ["LANGCHAIN_API_KEY"] = LANGSMITH_API_KEY
+    os.environ["LANGCHAIN_TRACING_V2"] = LANGSMITH_TRACING
+    os.environ["LANGCHAIN_PROJECT"] = LANGSMITH_PROJECT
+else:
+    # .env may set LANGSMITH_TRACING=true as a placeholder before a key is
+    # filled in -- without a key that just makes every LangChain call spam
+    # 401 auth warnings trying to report traces nobody can see. Force
+    # tracing off explicitly rather than relying on whatever raw value
+    # load_dotenv() happened to pull in.
+    os.environ["LANGSMITH_TRACING"] = "false"
+    os.environ["LANGCHAIN_TRACING_V2"] = "false"
 
 
 def missing_required_keys() -> list[str]:
