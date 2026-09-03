@@ -15,6 +15,7 @@ from langgraph.graph import END, START, StateGraph
 
 from rag_learn import config
 from rag_learn.embedding import EmbeddingPipeline
+from rag_learn.reranker import Reranker
 from rag_learn.search import Retriever
 from rag_learn.vectorstore import VectorStore
 
@@ -55,6 +56,7 @@ class _Clients:
     _pipeline: Optional[EmbeddingPipeline] = None
     _store: Optional[VectorStore] = None
     _retriever: Optional[Retriever] = None
+    _reranker: Optional[Reranker] = None
     _utility_llm: Optional[ChatGroq] = None
     _generation_llm: Optional[ChatGroq] = None
     _tavily: Optional[TavilySearch] = None
@@ -66,6 +68,12 @@ class _Clients:
             cls._store = cls._store or VectorStore()
             cls._retriever = Retriever(cls._store, cls._pipeline)
         return cls._retriever
+
+    @classmethod
+    def reranker(cls) -> Reranker:
+        if cls._reranker is None:
+            cls._reranker = Reranker()
+        return cls._reranker
 
     @classmethod
     def utility_llm(cls) -> ChatGroq:
@@ -90,9 +98,13 @@ class _Clients:
 
 
 def retrieve(state: GraphState) -> dict[str, Any]:
-    docs = _Clients.retriever().retrieve(
-        state["question"], top_k=config.TOP_K, score_threshold=config.SCORE_THRESHOLD
+    # Retrieve-then-rerank: fetch a wider candidate set by (cheap) vector
+    # similarity, then a cross-encoder scores each pair jointly for a more
+    # accurate ranking, keeping only the final top_k.
+    candidates = _Clients.retriever().retrieve(
+        state["question"], top_k=config.RETRIEVE_CANDIDATES, score_threshold=config.SCORE_THRESHOLD
     )
+    docs = _Clients.reranker().rerank(state["question"], candidates, top_k=config.TOP_K)
     return {"documents": docs}
 
 

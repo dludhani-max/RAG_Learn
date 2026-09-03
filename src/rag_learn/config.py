@@ -34,7 +34,16 @@ CHUNK_SIZE = int(os.getenv("RAG_CHUNK_SIZE", "1750"))
 CHUNK_OVERLAP = int(os.getenv("RAG_CHUNK_OVERLAP", "300"))
 
 # --- Retrieval -----------------------------------------------------------
+# Retrieve-then-rerank: fetch a wider candidate set by vector similarity
+# (cheap, coarse), then a cross-encoder scores each (query, chunk) pair
+# directly for a more accurate relevance ranking (slower per-pair but only
+# run over RETRIEVE_CANDIDATES items, not the whole collection) and keep
+# just the top TOP_K. A cross-encoder sees the query and chunk together,
+# unlike embedding similarity which compares them independently -- that
+# consistently ranks true relevance better.
 TOP_K = int(os.getenv("RAG_TOP_K", "5"))
+RETRIEVE_CANDIDATES = int(os.getenv("RAG_RETRIEVE_CANDIDATES", "20"))
+RERANK_MODEL = os.getenv("RAG_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 SCORE_THRESHOLD = float(os.getenv("RAG_SCORE_THRESHOLD", "0.3"))
 MAX_RETRIES = int(os.getenv("RAG_MAX_RETRIES", "2"))
 

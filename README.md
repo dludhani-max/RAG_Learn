@@ -75,12 +75,15 @@ Once the vector store is populated, ask questions through the full Corrective/Ad
 uv run python3 -m rag_learn.graph
 ```
 
-Flow: `retrieve` → `grade_documents` (an LLM call judges which retrieved chunks are actually
-relevant) → if enough are relevant, `generate`; if not and retries remain, `transform_query`
-rewrites the question and loops back to `retrieve`; once retries are exhausted, `web_search`
-(Tavily) fills in with live web results before generating. Answers include a deduplicated source
-list (local file/page or web URL). Retry count is capped by `RAG_MAX_RETRIES` (default 2) so a
-bad query can't loop forever.
+Flow: `retrieve` (fetches `RAG_RETRIEVE_CANDIDATES`, default 20, by vector similarity, then
+reranks down to `RAG_TOP_K` with a local cross-encoder, `BAAI/bge-reranker-v2-m3` — more accurate
+than vector similarity alone since it scores the query and chunk jointly rather than comparing
+separately-computed embeddings) → `grade_documents` (an LLM call judges which of those are
+actually relevant) → if enough are relevant, `generate`; if not and retries remain,
+`transform_query` rewrites the question and loops back to `retrieve`; once retries are exhausted,
+`web_search` (Tavily) fills in with live web results before generating. Answers include a
+deduplicated source list (local file/page or web URL). Retry count is capped by `RAG_MAX_RETRIES`
+(default 2) so a bad query can't loop forever.
 
 Grading and query-rewrite calls use `reasoning_effort="none"` on the Groq model to skip its
 internal `<think>` reasoning output for these short structured tasks — cheaper and faster, since
