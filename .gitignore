@@ -1,0 +1,24 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets
+.env
+
+# Data (personal documents, generated vector store)
+data/
+
+# Local tool artifacts
+graphify-out/
+
+# OS/editor junk
+.DS_Store
+*.ipynb_checkpoints/
+.ipynb_checkpoints/
