@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 from collections import defaultdict
 from typing import Any, List
@@ -101,6 +102,18 @@ class VectorStore:
                     "page": page,
                     "doc_index": source_chunk_index,
                     "content_length": len(doc.page_content),
+                    # Chroma metadata values must be scalars, so a list of
+                    # extracted diagram image paths is JSON-encoded here and
+                    # decoded back out in graph.py when building sources.
+                    "images_json": json.dumps(doc.metadata.get("images", [])),
+                    # Set by classifier.classify_and_tag before chunking
+                    # (Phase 2.5) -- Phase 3b's SQL/page-index retrieval
+                    # paths read this to decide how to serve a given chunk.
+                    # Defaults to "vector" so pre-Phase-2.5 chunks (or any
+                    # document type the classifier doesn't tag) fall back to
+                    # today's classic embedding search rather than an
+                    # unrecognized/missing route.
+                    "routing": str(doc.metadata.get("routing", "vector")),
                 }
             )
             documents_text.append(str(doc.page_content))

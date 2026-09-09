@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 from typing import Any, List
 
@@ -15,18 +16,28 @@ from langchain_core.documents import Document
 from PIL import Image
 
 from rag_learn import config
+from rag_learn.classifier import classify_and_tag
 
 # Below this many native-extracted characters, a PDF page is treated as
 # scanned/image-only and OCR'd instead (see Q&A AI PM.pdf: 171 pages,
 # ~3 chars/page natively, real content recovered via page-image OCR).
 PDF_OCR_CHAR_THRESHOLD = 50
 
-# Bump when loader logic materially changes (e.g. the per-page OCR fallback
-# and table extraction added here) -- sync.py folds this into its pipeline
-# fingerprint so existing files get reprocessed under the new logic instead
-# of being skipped as "unchanged" (their content_hash is unaffected by a
-# loader code change, so hash alone wouldn't catch this).
-LOADER_VERSION = 2
+# Embedded images smaller than this (either dimension) are treated as
+# icons/bullets/decorative elements, not genuine diagrams worth surfacing
+# back to the user (verified against this corpus: real diagrams run
+# 1000px+, decorative elements in QA AI.pdf were 200x62 / 500x300).
+MIN_DIAGRAM_DIMENSION = 150
+
+EXTRACTED_IMAGES_DIR = Path(config.VECTOR_STORE_DIR) / "extracted_images"
+
+# Bump when loader logic materially changes (e.g. the per-page OCR fallback,
+# table extraction, and embedded-diagram extraction added here) -- sync.py
+# folds this into its pipeline fingerprint so existing files get
+# reprocessed under the new logic instead of being skipped as "unchanged"
+# (their content_hash is unaffected by a loader code change, so hash alone
+# wouldn't catch this).
+LOADER_VERSION = 3
 
 
 def _tag(doc: Document, path: Path, file_type: str, **extra: Any) -> Document:
@@ -69,12 +80,49 @@ def _table_to_markdown(table: List[List[Any]]) -> str:
     return "\n".join(lines)
 
 
+def _extract_diagrams(
+    fitz_doc, page, path: Path, page_index: int, seen_hashes: set
+) -> List[str]:
+    """Save each embedded raster image on this page to disk, skipping tiny
+    icons/decorative elements. Returns saved file paths. Only called for
+    natively-extracted pages -- an OCR-fallback page's "embedded image" is
+    just the whole scanned page itself (already covered by the OCR render),
+    not a distinct diagram.
+
+    seen_hashes is shared across all pages of one document (populated by the
+    caller): a cover banner or logo embedded verbatim on multiple pages
+    passes the size filter (verified: QA AI.pdf's repeated 500x300 title
+    banner appeared on 3 separate pages, indistinguishable by size alone
+    from a real diagram) but is identical bytes every time, so content-hash
+    dedup within the document catches it while a genuine diagram -- unique
+    per page -- is unaffected."""
+    saved: List[str] = []
+    EXTRACTED_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    for idx, img in enumerate(page.get_images(full=True)):
+        try:
+            base = fitz_doc.extract_image(img[0])
+        except Exception as e:
+            print(f"[ERROR] Failed to extract image on {path.name} page {page_index}: {e}")
+            continue
+        if base.get("width", 0) < MIN_DIAGRAM_DIMENSION or base.get("height", 0) < MIN_DIAGRAM_DIMENSION:
+            continue
+        image_hash = hashlib.sha256(base["image"]).hexdigest()
+        if image_hash in seen_hashes:
+            continue
+        seen_hashes.add(image_hash)
+        out_path = EXTRACTED_IMAGES_DIR / f"{path.stem}__p{page_index}__{idx}.{base['ext']}"
+        out_path.write_bytes(base["image"])
+        saved.append(str(out_path))
+    return saved
+
+
 def _load_pdf(path: Path) -> List[Document]:
     """Per-page extraction: native text where available, OCR fallback for
     scanned/image-only pages, plus local (pdfplumber, free/no-LLM) table
     detection appended as markdown alongside the page's prose text."""
     docs: List[Document] = []
     fitz_doc = pymupdf.open(str(path))
+    seen_image_hashes: set = set()
     try:
         with pdfplumber.open(str(path)) as plumber_doc:
             for i, page in enumerate(fitz_doc):
@@ -100,9 +148,18 @@ def _load_pdf(path: Path) -> List[Document]:
                         has_table = True
                         content = content + "\n\n" + "\n\n".join(md_tables)
 
+                images = (
+                    _extract_diagrams(fitz_doc, page, path, i, seen_image_hashes)
+                    if extraction_method == "native"
+                    else []
+                )
+
                 doc = Document(page_content=content)
                 docs.append(
-                    _tag(doc, path, "pdf", page=i, extraction_method=extraction_method, has_table=has_table)
+                    _tag(
+                        doc, path, "pdf", page=i, extraction_method=extraction_method,
+                        has_table=has_table, images=images,
+                    )
                 )
     finally:
         fitz_doc.close()
@@ -133,7 +190,9 @@ def _load_image(path: Path) -> List[Document]:
     text = pytesseract.image_to_string(Image.open(path))
     if not text.strip():
         return []
-    return [_tag(Document(page_content=text), path, "image")]
+    # The file itself is the "diagram" here -- reference its own path so it
+    # surfaces the same way an embedded PDF diagram would.
+    return [_tag(Document(page_content=text), path, "image", images=[str(path)])]
 
 
 # Extension -> (file_type label, per-file loader). Shared by load_all_documents
@@ -181,6 +240,7 @@ def load_all_documents(data_dir: str) -> List[Any]:
 
     documents: List[Any] = []
     counts: dict[str, int] = {}
+    routing_counts: dict[str, int] = {}
     for path in sorted(data_path.glob("**/*")):
         if not path.is_file() or path.suffix.lower() not in LOADERS:
             continue
@@ -189,8 +249,12 @@ def load_all_documents(data_dir: str) -> List[Any]:
         file_type, _ = LOADERS[path.suffix.lower()]
         loaded = load_document(path)
         counts[file_type] = counts.get(file_type, 0) + len(loaded)
+        if loaded:
+            routing = classify_and_tag(path, loaded)
+            routing_counts[routing] = routing_counts.get(routing, 0) + 1
         documents.extend(loaded)
         print(f"[DEBUG] Loaded {len(loaded)} docs from {file_type}: {path.name}")
 
     print(f"[DEBUG] Ingestion summary: {counts} | total documents: {len(documents)}")
+    print(f"[DEBUG] Routing summary: {routing_counts}")
     return documents

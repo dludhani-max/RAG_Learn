@@ -15,6 +15,7 @@ import os
 from typing import Any, Optional
 
 import chromadb
+from chromadb.errors import NotFoundError
 
 from rag_learn import config
 
@@ -39,11 +40,28 @@ class QACache:
             metadata={"description": "Cached question -> answer pairs", "hnsw:space": "cosine"},
         )
 
-    def lookup(self, question: str, question_embedding) -> Optional[dict[str, Any]]:
-        if self.collection.count() == 0:
-            return None
+    def _refresh_stale_collection(self) -> None:
+        """Re-resolve the collection handle -- verified live: a *different*
+        QACache instance (a separate process or script) calling clear()
+        used to drop and recreate the collection under a new internal id,
+        which silently broke every other already-open handle to the old
+        one (a long-running Streamlit server hit this mid-session: every
+        cache lookup/store started raising `NotFoundError` until the
+        server was restarted). clear() no longer recreates the collection
+        (see below), but this stays as a self-heal for any other way the
+        collection's identity could change out from under a live handle."""
+        self.collection = self._get_or_create_collection()
 
-        results = self.collection.query(query_embeddings=[question_embedding.tolist()], n_results=1)
+    def lookup(self, question: str, question_embedding) -> Optional[dict[str, Any]]:
+        try:
+            if self.collection.count() == 0:
+                return None
+            results = self.collection.query(query_embeddings=[question_embedding.tolist()], n_results=1)
+        except NotFoundError:
+            self._refresh_stale_collection()
+            if self.collection.count() == 0:
+                return None
+            results = self.collection.query(query_embeddings=[question_embedding.tolist()], n_results=1)
         if not results["documents"] or not results["documents"][0]:
             return None
 
@@ -62,20 +80,32 @@ class QACache:
 
     def store(self, question: str, question_embedding, generation: str, sources: list[dict[str, Any]]):
         doc_id = f"qa_{hashlib.sha256(question.encode()).hexdigest()[:16]}"
-        self.collection.upsert(
+        payload = dict(
             ids=[doc_id],
             embeddings=[question_embedding.tolist()],
             documents=[question],
             metadatas=[{"generation": generation, "sources_json": json.dumps(sources)}],
         )
+        try:
+            self.collection.upsert(**payload)
+        except NotFoundError:
+            self._refresh_stale_collection()
+            self.collection.upsert(**payload)
 
     def clear(self):
         """Wipe the whole cache -- called by sync.py after any document
         change, since a stale cached answer served silently is worse than a
-        cache miss."""
-        try:
-            self.client.delete_collection(self.collection_name)
-        except Exception:
-            pass  # nothing to delete yet
-        self.collection = self._get_or_create_collection()
+        cache miss.
+
+        Deletes every entry *within* the collection rather than dropping
+        and recreating the collection itself -- verified live: recreating
+        it changes the collection's internal id, which silently breaks
+        every other already-open handle to the old one (any other process
+        or long-running Streamlit server holding a QACache instance starts
+        raising `NotFoundError` on its next lookup/store, with no
+        indication why). Clearing contents in place keeps the collection's
+        identity stable, so other live handles keep working."""
+        ids = self.collection.get()["ids"]
+        if ids:
+            self.collection.delete(ids=ids)
         print(f"[CACHE] Cleared Q&A cache (collection: {self.collection_name})")

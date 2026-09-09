@@ -13,7 +13,14 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from rag_learn import config
+from rag_learn import config, vectorless_pageindex, vectorless_sql
+from rag_learn.classifier import (
+    ROUTING_PAGEINDEX,
+    ROUTING_SQL,
+    ROUTING_VECTOR,
+    TABULAR_EXTENSIONS,
+    classify_and_tag,
+)
 from rag_learn.data_loader import LOADER_VERSION, LOADERS, load_document
 from rag_learn.embedding import EmbeddingPipeline
 from rag_learn.vectorstore import VectorStore
@@ -22,6 +29,15 @@ MANIFEST_PATH = Path(config.VECTOR_STORE_DIR) / "manifest.json"
 PENDING_REVIEW_PATH = Path(config.VECTOR_STORE_DIR) / "pending_review.json"
 
 FILENAME_SIMILARITY_THRESHOLD = 0.6
+# Filename similarity alone isn't enough signal that two files are the same
+# document -- verified live: "100 LLM Interview Questions .pdf" vs. "RAG
+# Interview Questions .pdf" scored 0.81 on filename alone (shared "Interview
+# Questions" wording) despite being unrelated documents, which would have
+# auto-deleted the older one's page-index tree. Content similarity on a text
+# preview is the second, independent signal required before either an
+# auto-replace or even a manual-review flag fires.
+CONTENT_SIMILARITY_THRESHOLD = 0.5
+CONTENT_PREVIEW_CHARS = 4000
 
 _DATE_PATTERNS = [
     (re.compile(r"(\d{4})[-_.](\d{2})[-_.](\d{2})"), "%Y-%m-%d"),
@@ -66,6 +82,35 @@ def _recency_signal(path: Path) -> tuple[date, str]:
     return datetime.fromtimestamp(path.stat().st_mtime).date(), "mtime"
 
 
+def _preview_text(path: Path) -> Optional[str]:
+    """A cheap text sample for content-similarity comparison -- not a full
+    load, just enough (CONTENT_PREVIEW_CHARS) to tell two same-named-ish
+    files apart by what they actually say. Returns None on any extraction
+    failure so callers can fail safe (no auto-replace) rather than compare
+    against empty/garbage text."""
+    try:
+        docs = load_document(path)
+    except Exception:
+        return None
+    if not docs:
+        return None
+    text = "\n".join(d.page_content for d in docs)[:CONTENT_PREVIEW_CHARS]
+    return text or None
+
+
+def _content_similarity(old_path: Path, new_path: Path) -> Optional[float]:
+    """None means "couldn't compare" (a file failed to load, or the old file
+    no longer exists on disk) -- callers must treat that as "not confirmed
+    similar," not as a pass."""
+    if not old_path.exists():
+        return None
+    old_text = _preview_text(old_path)
+    new_text = _preview_text(new_path)
+    if old_text is None or new_text is None:
+        return None
+    return difflib.SequenceMatcher(None, old_text, new_text).ratio()
+
+
 def _load_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
@@ -80,6 +125,29 @@ def _save_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, indent=2, default=str))
 
 
+def list_indexed_documents() -> dict[str, list[str]]:
+    """Group the manifest's live (non-superseded) entries by routing,
+    returning basenames -- used by the Streamlit Chat page's "search this
+    document" picker, so it doesn't need to reach into sync's private
+    manifest format itself."""
+    manifest = _load_json(MANIFEST_PATH, {})
+    grouped: dict[str, list[str]] = {}
+    for path_str, entry in manifest.items():
+        if entry.get("superseded_by"):
+            continue
+        routing = entry.get("routing", ROUTING_VECTOR)
+        grouped.setdefault(routing, []).append(Path(path_str).name)
+    return grouped
+
+
+def load_pending_review() -> list[dict[str, Any]]:
+    return _load_json(PENDING_REVIEW_PATH, [])
+
+
+def save_pending_review(entries: list[dict[str, Any]]) -> None:
+    _save_json(PENDING_REVIEW_PATH, entries)
+
+
 def _walk_data_dir(data_dir: Path):
     vector_store_dir = Path(config.VECTOR_STORE_DIR).resolve()
     for path in sorted(data_dir.glob("**/*")):
@@ -90,15 +158,67 @@ def _walk_data_dir(data_dir: Path):
         yield path
 
 
-def _ingest_file(path: Path, pipeline: EmbeddingPipeline, store: VectorStore) -> list[str]:
+def _ingest_file(
+    path: Path, pipeline: EmbeddingPipeline, store: VectorStore
+) -> tuple[list[str], str, dict[str, Any]]:
+    """Route a file to the right ingestion mechanism based on its
+    classification. Returns (chunk_ids, routing, extra) -- extra carries
+    whatever the manifest needs to clean this entry up later (a DuckDB
+    table name or a page-index tree path), since vectorless routes have no
+    chunk_ids for VectorStore.delete to act on."""
+    # Tabular files skip load_document/classification text analysis
+    # entirely: extension alone is sufficient signal (matches
+    # classifier.TABULAR_EXTENSIONS), and DuckDB reading the file directly
+    # is both cheaper and more useful than a per-row Document list from
+    # CSVLoader/UnstructuredExcelLoader, which vectorless_sql doesn't need.
+    if path.suffix.lower() in TABULAR_EXTENSIONS:
+        table = vectorless_sql.ingest_table(path)
+        return [], ROUTING_SQL, {"sql_table": table}
+
     docs = load_document(path)
     if not docs:
-        return []
+        return [], ROUTING_VECTOR, {}
+
+    # Classify before chunking -- routing is a whole-document decision
+    # (e.g. "this PDF is sectioned"), not a per-chunk one, and the
+    # page-index path needs the source document's own structure, not a
+    # fragment of it.
+    routing = classify_and_tag(path, docs)
+
+    if routing == ROUTING_SQL:
+        # Only reachable for images the classifier judged tabular-looking
+        # (TABULAR_EXTENSIONS files already returned above) -- image-to-table
+        # extraction isn't implemented (Phase 3b scoped to native tabular
+        # files), so fall back to embedding rather than silently dropping
+        # the content, and correct the tag to match what actually happened.
+        print(f"[SQL] {path.name} classified tabular but image-to-table extraction isn't implemented -- embedding instead.")
+        routing = ROUTING_VECTOR
+        for doc in docs:
+            doc.metadata["routing"] = routing
+
+    if routing == ROUTING_PAGEINDEX:
+        tree_path = vectorless_pageindex.build_tree(path, docs)
+        return [], routing, {"tree_path": tree_path}
+
     chunks = pipeline.chunk_documents(docs)
     if not chunks:
-        return []
+        return [], routing, {}
     embeddings = pipeline.embed_chunks(chunks)
-    return store.add_documents(chunks, embeddings)
+    return store.add_documents(chunks, embeddings), routing, {}
+
+
+def _cleanup_entry(entry: dict[str, Any], store: VectorStore) -> None:
+    """Undo whatever _ingest_file did for this manifest entry -- dispatches
+    on the routing that was recorded at ingest time, since a vector entry's
+    chunk_ids, a SQL entry's table, and a page-index entry's tree file each
+    need a different removal call."""
+    routing = entry.get("routing", ROUTING_VECTOR)
+    if routing == ROUTING_SQL and entry.get("sql_table"):
+        vectorless_sql.drop_table(entry["sql_table"])
+    elif routing == ROUTING_PAGEINDEX and entry.get("tree_path"):
+        vectorless_pageindex.delete_tree(entry["tree_path"])
+    else:
+        store.delete(entry.get("chunk_ids", []))
 
 
 def sync(data_dir: Optional[str] = None) -> dict[str, Any]:
@@ -118,7 +238,13 @@ def sync(data_dir: Optional[str] = None) -> dict[str, Any]:
     missing_path_strs = manifest_paths - current_path_strs
     common_path_strs = current_path_strs & manifest_paths
 
-    summary = {"added": [], "updated": [], "removed": [], "renamed": [], "skipped": 0, "auto_replaced": [], "pending_review": []}
+    summary = {
+        "added": [], "updated": [], "removed": [], "renamed": [], "skipped": 0,
+        "auto_replaced": [], "pending_review": [], "routing_counts": {},
+    }
+
+    def _record_routing(routing: str) -> None:
+        summary["routing_counts"][routing] = summary["routing_counts"].get(routing, 0) + 1
 
     pipeline: Optional[EmbeddingPipeline] = None
     store: Optional[VectorStore] = None
@@ -177,6 +303,19 @@ def sync(data_dir: Optional[str] = None) -> dict[str, Any]:
         if best_match is None or best_ratio < FILENAME_SIMILARITY_THRESHOLD:
             continue
 
+        content_ratio = _content_similarity(Path(best_match), new_path)
+        if content_ratio is None or content_ratio < CONTENT_SIMILARITY_THRESHOLD:
+            # Filenames looked alike but the actual text doesn't -- these are
+            # two different documents that happen to share wording in their
+            # names, not versions of the same one. Don't auto-replace, and
+            # don't even flag for manual review (that would just be noise for
+            # every unrelated pair with a generic-ish filename).
+            print(
+                f"[SYNC] '{new_str}' filename resembles '{best_match}' (similarity={best_ratio:.2f}) "
+                f"but content does not (content_similarity={content_ratio}) -- treating as a distinct document."
+            )
+            continue
+
         new_date, new_source = _recency_signal(new_path)
         old_path = Path(best_match)
         old_date, old_source = (
@@ -208,14 +347,14 @@ def sync(data_dir: Optional[str] = None) -> dict[str, Any]:
     # auto-replace. ---
     for missing_str in unresolved_missing:
         _ensure_clients()
-        store.delete(manifest[missing_str].get("chunk_ids", []))
+        _cleanup_entry(manifest[missing_str], store)
         del manifest[missing_str]
         summary["removed"].append(missing_str)
         print(f"[SYNC] Removed (deleted from disk): {missing_str}")
 
     for old_str, new_str in auto_replace_targets.items():
         _ensure_clients()
-        store.delete(manifest[old_str].get("chunk_ids", []))
+        _cleanup_entry(manifest[old_str], store)
         # The old file may still be physically present on disk (the user
         # added a new version alongside it rather than deleting it) -- in
         # that case it stays in current_path_strs/common_path_strs, so a
@@ -249,17 +388,20 @@ def sync(data_dir: Optional[str] = None) -> dict[str, Any]:
             continue  # unchanged, nothing to do
 
         _ensure_clients()
-        store.delete(entry.get("chunk_ids", []))
-        chunk_ids = _ingest_file(path, pipeline, store)
+        _cleanup_entry(entry, store)
+        chunk_ids, routing, extra = _ingest_file(path, pipeline, store)
+        _record_routing(routing)
         manifest[path_str] = {
             "content_hash": content_hash,
             "chunk_ids": chunk_ids,
+            "routing": routing,
             "pipeline_fingerprint": fingerprint,
             "file_mtime": path.stat().st_mtime,
             "last_synced": datetime.now().isoformat(),
+            **extra,
         }
         summary["updated"].append(path_str)
-        print(f"[SYNC] Updated: {path_str} ({len(chunk_ids)} chunks)")
+        print(f"[SYNC] Updated: {path_str} ({len(chunk_ids)} chunks, routing={routing})")
 
     # --- Apply new files (including auto-replace winners). ---
     for path_str in unresolved_new:
@@ -271,16 +413,19 @@ def sync(data_dir: Optional[str] = None) -> dict[str, Any]:
             continue
 
         _ensure_clients()
-        chunk_ids = _ingest_file(path, pipeline, store)
+        chunk_ids, routing, extra = _ingest_file(path, pipeline, store)
+        _record_routing(routing)
         manifest[path_str] = {
             "content_hash": content_hash,
             "chunk_ids": chunk_ids,
+            "routing": routing,
             "pipeline_fingerprint": fingerprint,
             "file_mtime": path.stat().st_mtime,
             "last_synced": datetime.now().isoformat(),
+            **extra,
         }
         summary["added"].append(path_str)
-        print(f"[SYNC] Added: {path_str} ({len(chunk_ids)} chunks)")
+        print(f"[SYNC] Added: {path_str} ({len(chunk_ids)} chunks, routing={routing})")
 
     _save_json(MANIFEST_PATH, manifest)
     _save_json(PENDING_REVIEW_PATH, pending_review)
@@ -300,6 +445,8 @@ def sync(data_dir: Optional[str] = None) -> dict[str, Any]:
         f"auto_replaced={len(summary['auto_replaced'])} pending_review={len(summary['pending_review'])} "
         f"skipped={summary['skipped']}"
     )
+    if summary["routing_counts"]:
+        print(f"[SYNC] Routing decisions this run: {summary['routing_counts']}")
     return summary
 
 
