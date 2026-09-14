@@ -62,6 +62,57 @@ def _get_pageindex_picker_llm():
     return _pageindex_picker_llm
 
 
+_embedder = None
+
+_TOP_N_CANDIDATES = 8
+
+
+def _get_embedder():
+    """Lazy singleton, same pattern as the LLM getters above -- avoids
+    loading the (~1.5GB) embedding model for a query that never needs the
+    prefilter (e.g. a scoped single-document query)."""
+    global _embedder
+    if _embedder is None:
+        from sentence_transformers import SentenceTransformer
+
+        _embedder = SentenceTransformer(config.EMBEDDING_MODEL)
+    return _embedder
+
+
+def _prefilter_trees(question: str, tree_paths: List[Path], top_n: int = _TOP_N_CANDIDATES) -> List[Path]:
+    """Local, free, no-LLM-call narrowing of which trees are even worth an
+    LLM look -- cosine similarity between the question and each tree's own
+    top-level section summaries (already written at ingestion), using the
+    same embedding model already loaded for vector search. Verified live:
+    firing an LLM call per tree (45+ trees in this corpus) was the actual
+    bottleneck for an unscoped query (4.5+ minutes, ~130 calls); this step
+    is a single local encode pass plus a numpy comparison, effectively
+    free and near-instant."""
+    if len(tree_paths) <= top_n:
+        return tree_paths
+    import numpy as np
+
+    model = _get_embedder()
+    question_embedding = model.encode([question])[0]
+
+    scored = []
+    for tp in tree_paths:
+        tree = _load_tree(tp)
+        summary_text = " ".join(s.get("summary") or "" for s in tree.get("sections", []))
+        if not summary_text.strip():
+            scored.append((tp, 0.0))
+            continue
+        tree_embedding = model.encode([summary_text])[0]
+        similarity = float(
+            np.dot(question_embedding, tree_embedding)
+            / (np.linalg.norm(question_embedding) * np.linalg.norm(tree_embedding) + 1e-9)
+        )
+        scored.append((tp, similarity))
+
+    scored.sort(key=lambda pair: pair[1], reverse=True)
+    return [tp for tp, _ in scored[:top_n]]
+
+
 def _tree_path(path: Path) -> Path:
     safe_stem = re.sub(r"[^a-zA-Z0-9_-]", "_", path.stem)
     return TREES_DIR / f"{safe_stem}.json"
