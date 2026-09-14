@@ -242,6 +242,26 @@ def get_llm(temperature: float = 0.0, max_tokens: "int | None" = None, purpose: 
     return llm.with_config({"callbacks": [telemetry.TelemetryCallback(purpose=purpose)]})
 
 
+def get_llm_groq_only(temperature: float = 0.0, max_tokens: "int | None" = None, purpose: str = "unspecified"):
+    """Groq-only construction with NO fallback chain -- for a call site that
+    fires many times per query in a short burst (see vectorless_pageindex's
+    batched relevance pick). Verified live: a bursty volume of calls
+    saturates the free OpenRouter fallback tier just as badly as Groq
+    itself, and waiting 10+ seconds per call on a free model that ignores
+    "answer with one number" instructions costs more than it's worth for a
+    cheap relevance check. Callers at this call site must handle a failure
+    themselves (fail open toward inclusion, not exclusion) rather than
+    trusting a slow fallback to save them."""
+    from langchain_groq import ChatGroq
+
+    from rag_learn import telemetry
+
+    llm = ChatGroq(**llm_kwargs(temperature=temperature, max_tokens=max_tokens)).with_config(
+        {"tags": ["provider:groq"]}
+    )
+    return llm.with_config({"callbacks": [telemetry.TelemetryCallback(purpose=purpose)]})
+
+
 def get_independent_judge_llm(temperature: float = 0.0, max_tokens: "int | None" = None, purpose: str = "independent_judge"):
     """A judge LLM deliberately NOT sharing a provider with get_llm()'s
     primary (Groq) -- for use where grading/validating a candidate
