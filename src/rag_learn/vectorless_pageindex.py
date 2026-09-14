@@ -423,6 +423,57 @@ def _pick_section(question: str, sections: List[Dict[str, Any]]) -> Optional[int
     return idx if 0 <= idx < len(sections) else None
 
 
+_pageindex_batch_llm = None
+
+
+def _get_pageindex_batch_llm():
+    global _pageindex_batch_llm
+    if _pageindex_batch_llm is None:
+        # No fallback chain (get_llm_groq_only) -- see _pick_sections_batch's
+        # docstring for why a slow free-model fallback isn't worth it here.
+        _pageindex_batch_llm = config.get_llm_groq_only(
+            temperature=0.0, max_tokens=60, purpose="pageindex_batch_pick"
+        )
+    return _pageindex_batch_llm
+
+
+def _pick_sections_batch(question: str, sections: List[Dict[str, Any]]) -> List[int]:
+    """Batched version of _pick_section: one LLM call judging ALL candidate
+    sections at once (mirrors graph.grade_documents' batching), returning
+    EVERY plausibly relevant index rather than a single best match -- a
+    broad/definitional question (e.g. "What is RAG?") legitimately has a
+    paragraph-level answer spread across several different documents rather
+    than being any one document's dedicated chapter, and keeping only one
+    match systematically under-serves that case. On failure, keeps every
+    candidate rather than waiting on a slow fallback (see
+    get_llm_groq_only's docstring)."""
+    if not sections:
+        return []
+    listing = "\n".join(f"[{i}] {s['title']}: {s['summary']}" for i, s in enumerate(sections))
+    prompt = (
+        "Given the question and this list of document sections, respond with ONLY a "
+        "comma-separated list of the bracketed index numbers of every section that looks "
+        "at least plausibly relevant (e.g. `0,2,3`), or `none` if none are. Err toward "
+        "including a section if it's a reasonable candidate -- a downstream step will "
+        "double check. Each section's index is the number in [brackets] at the start of "
+        "its line -- ignore any other numbers inside a section's own title or summary.\n\n"
+        f"Sections:\n{listing}\n\nQuestion: {question}\n\nAnswer:"
+    )
+    try:
+        answer = _get_pageindex_batch_llm().invoke(prompt).content.strip().lower()
+    except Exception as e:
+        print(f"[ERROR] Page-index batch section selection failed, keeping all candidates: {e}")
+        return list(range(len(sections)))
+    if answer == "none":
+        return []
+    indices: set[int] = set()
+    for tok in answer.replace(" ", "").split(","):
+        digits = re.sub(r"[^\d]", "", tok)
+        if digits and 0 <= int(digits) < len(sections):
+            indices.add(int(digits))
+    return sorted(indices)
+
+
 def _query_tree(question: str, tree_path: Path) -> Optional[Dict[str, Any]]:
     """Navigate one document's tree top-down (bounded by MAX_WALK_DEPTH) and
     return its matched section as a retrieved-document dict, or None if
