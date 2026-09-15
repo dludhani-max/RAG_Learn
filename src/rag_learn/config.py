@@ -55,7 +55,7 @@ CACHE_COLLECTION_NAME = os.getenv("RAG_CACHE_COLLECTION_NAME", "qa_cache")
 CACHE_SIMILARITY_THRESHOLD = float(os.getenv("RAG_CACHE_SIMILARITY_THRESHOLD", "0.95"))
 
 # --- Generation / judge LLM ----------------------------------------------
-GROQ_MODEL_NAME = os.getenv("RAG_GROQ_MODEL_NAME", "qwen/qwen3.6-27b")
+GROQ_MODEL_NAME = os.getenv("RAG_GROQ_MODEL_NAME", "qwen/qwen3.8-27b")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # --- Anthropic fallback LLM (Tier 2 router) -------------------------------
@@ -124,7 +124,7 @@ def missing_required_keys() -> list[str]:
     return [name for name, value in required.items() if not value]
 
 
-def llm_kwargs(temperature: float = 0.0, max_tokens: "int | None" = None) -> dict:
+def llm_kwargs(temperature: float = 0.0, max_tokens: "int | None" = None, model_name: str = GROQ_MODEL_NAME) -> dict:
     """Model-family-aware kwargs for constructing a ChatGroq client, so every
     LLM call site in the app (7 of them, across graph.py, guardrails.py,
     classifier.py, vectorless_sql.py, vectorless_pageindex.py, and eval/)
@@ -136,10 +136,15 @@ def llm_kwargs(temperature: float = 0.0, max_tokens: "int | None" = None) -> dic
     Groq's own docs: gpt-oss models reject it outright (they only accept
     low/medium/high) and need a different mechanism entirely
     (`model_kwargs={"include_reasoning": False}`) to get a clean
-    final-answer-only response the way Qwen's "none" does.
+    final-answer-only response the way Qwen's "none" does. Groq's
+    agentic "compound" models reject reasoning_effort entirely (400
+    "not supported with this model") and already emit zero reasoning
+    tokens by default, so they get neither kwarg.
     """
-    kwargs: dict = {"model_name": GROQ_MODEL_NAME, "temperature": temperature}
-    if GROQ_MODEL_NAME.startswith("openai/gpt-oss"):
+    kwargs: dict = {"model_name": model_name, "temperature": temperature}
+    if model_name.startswith("groq/compound"):
+        pass
+    elif model_name.startswith("openai/gpt-oss"):
         kwargs["reasoning_effort"] = "low"
         kwargs["model_kwargs"] = {"include_reasoning": False}
         # Verified live: even at reasoning_effort="low" with include_reasoning
@@ -242,7 +247,12 @@ def get_llm(temperature: float = 0.0, max_tokens: "int | None" = None, purpose: 
     return llm.with_config({"callbacks": [telemetry.TelemetryCallback(purpose=purpose)]})
 
 
-def get_llm_groq_only(temperature: float = 0.0, max_tokens: "int | None" = None, purpose: str = "unspecified"):
+def get_llm_groq_only(
+    temperature: float = 0.0,
+    max_tokens: "int | None" = None,
+    purpose: str = "unspecified",
+    model_name: str = "groq/compound-mini",
+):
     """Groq-only construction with NO fallback chain -- for a call site that
     fires many times per query in a short burst (see vectorless_pageindex's
     batched relevance pick). Verified live: a bursty volume of calls
@@ -263,9 +273,9 @@ def get_llm_groq_only(temperature: float = 0.0, max_tokens: "int | None" = None,
 
     from rag_learn import telemetry
 
-    llm = ChatGroq(**llm_kwargs(temperature=temperature, max_tokens=max_tokens), max_retries=0).with_config(
-        {"tags": ["provider:groq"]}
-    )
+    llm = ChatGroq(
+        **llm_kwargs(temperature=temperature, max_tokens=max_tokens, model_name=model_name), max_retries=0
+    ).with_config({"tags": ["provider:groq"]})
     return llm.with_config({"callbacks": [telemetry.TelemetryCallback(purpose=purpose)]})
 
 
