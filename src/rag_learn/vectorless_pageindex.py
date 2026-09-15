@@ -155,7 +155,7 @@ def _prefilter_sections(
             (" ".join(s.get("summary") or "" for s in t.get("sections", [])) or t.get("source_file", ""))[:2000]
             for _, t in tree_items
         ]
-        tree_embeddings = model.encode(tree_texts)
+        tree_embeddings = model.encode(tree_texts, batch_size=32)
         tree_similarities = _cosine_similarities(question_embedding, tree_embeddings)
         ranked_tree_idx = sorted(range(len(tree_items)), key=lambda i: tree_similarities[i], reverse=True)[
             :top_n_trees
@@ -174,8 +174,13 @@ def _prefilter_sections(
     if len(flat_sections) <= top_n:
         return trees, flat_sections, origin
 
-    texts = [f"{s['title']}: {s.get('summary') or ''}" for s in flat_sections]
-    section_embeddings = model.encode(texts)
+    # Same safeguard as the coarse pass above (2000-char cap): an
+    # unsummarized or runaway-length summary here, multiplied across a
+    # 1,000+-section shortlist and batched by encode(), is what produced a
+    # verified 462GB allocation and hang -- cap text length and force a
+    # bounded batch_size so no single encode() call sees an unbounded batch.
+    texts = [f"{s['title']}: {s.get('summary') or ''}"[:2000] for s in flat_sections]
+    section_embeddings = model.encode(texts, batch_size=32)
     similarities = _cosine_similarities(question_embedding, section_embeddings)
 
     ranked = sorted(range(len(flat_sections)), key=lambda i: similarities[i], reverse=True)[:top_n]
