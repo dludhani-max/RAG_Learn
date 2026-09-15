@@ -14,6 +14,7 @@ no-related-answer response instead of a fallback trigger.
 
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any, Optional, TypedDict
 
@@ -72,6 +73,14 @@ class GraphState(TypedDict):
     # served for that question indefinitely (the cache only invalidates on
     # document changes, not time), long after the service recovered.
     _skip_cache: bool
+    # First-pass vectorless (SQL + page-index) results, cached so a
+    # transform_query retry doesn't re-pay for the entire fan-out -- see
+    # retrieve()'s retry branch below.
+    _vectorless_results: list[dict[str, Any]]
+    # time.monotonic() at input_safety_guardrail -- lets _route_after_grading
+    # enforce a hard time budget regardless of retry_count (see
+    # QUERY_TIME_BUDGET_SECONDS below).
+    _query_start_time: float
 
 
 class _Clients:
@@ -140,9 +149,14 @@ def input_safety_guardrail(state: GraphState) -> dict[str, Any]:
     2. PII redaction on the question itself -- deterministic, no extra LLM
        call, so it always runs regardless of the safety verdict.
 
+    Also records _query_start_time here (not in build_initial_state) so it
+    reflects actual processing start, used by _route_after_grading's hard
+    time budget.
+
     Corpus-relevance ("is this actually answerable from what's indexed?")
     is NOT checked here -- that's grade_documents' job, downstream, since
     it needs to see actual retrieval results to judge accurately."""
+    start_time = time.monotonic()
     redacted_question = guardrails.redact_pii(state["question"])
     is_safe, refusal = guardrails.check_input_safety(redacted_question)
     if not is_safe:
@@ -152,8 +166,14 @@ def input_safety_guardrail(state: GraphState) -> dict[str, Any]:
             "original_question": redacted_question,
             "generation": refusal,
             "sources": [],
+            "_query_start_time": start_time,
         }
-    return {"blocked": False, "question": redacted_question, "original_question": redacted_question}
+    return {
+        "blocked": False,
+        "question": redacted_question,
+        "original_question": redacted_question,
+        "_query_start_time": start_time,
+    }
 
 
 def check_cache(state: GraphState) -> dict[str, Any]:
@@ -232,7 +252,20 @@ def retrieve(state: GraphState) -> dict[str, Any]:
         # node) already filters the combined list for actual relevance, so
         # merging in every vectorless result here and letting grading sort
         # it out is safe, not just additive noise.
-        docs = docs + vectorless_sql.query(state["question"]) + vectorless_pageindex.query(state["question"])
+        if state["retry_count"] == 0:
+            # First pass: run the full vectorless fan-out and cache the
+            # result on state for any retry to reuse.
+            vectorless_results = vectorless_sql.query(state["question"]) + vectorless_pageindex.query(
+                state["question"]
+            )
+            docs = docs + vectorless_results
+            return {"documents": docs, "_vectorless_results": vectorless_results}
+        # A retry only reruns vector search with the rewritten question --
+        # rewording doesn't change which page-index section or SQL table an
+        # LLM would pick the same way it changes embedding-similarity
+        # results, so re-paying for the entire fan-out again on every retry
+        # bought nothing but cost. Reuse what the first pass already found.
+        docs = docs + state.get("_vectorless_results", [])
 
     return {"documents": docs}
 
@@ -399,6 +432,10 @@ def output_guardrail(state: GraphState) -> dict[str, Any]:
 
 # --- Routing -----------------------------------------------------------------
 
+# Leaves headroom under the ~30s end-to-end target for generate() +
+# output_guardrail to still run after this check fires.
+QUERY_TIME_BUDGET_SECONDS = 25
+
 
 def _route_after_input_guardrail(state: GraphState) -> str:
     return "blocked" if state["blocked"] else "check_cache"
@@ -411,7 +448,8 @@ def _route_after_cache_check(state: GraphState) -> str:
 def _route_after_grading(state: GraphState) -> str:
     if not state["no_relevant_docs"]:
         return "generate"
-    if state["retry_count"] < config.MAX_RETRIES:
+    elapsed = time.monotonic() - state.get("_query_start_time", 0.0)
+    if state["retry_count"] < config.MAX_RETRIES and elapsed < QUERY_TIME_BUDGET_SECONDS:
         return "transform_query"
     return "no_related_answer"
 
@@ -481,6 +519,8 @@ def build_initial_state(question: str, target_document: Optional[str] = None) ->
         "blocked": False,
         "_last_context": "",
         "_skip_cache": False,
+        "_vectorless_results": [],
+        "_query_start_time": 0.0,
     }
 
 
