@@ -271,14 +271,28 @@ def retrieve(state: GraphState) -> dict[str, Any]:
 
 
 def grade_documents(state: GraphState) -> dict[str, Any]:
-    """One batched LLM call grading all retrieved docs at once (cheaper and
+    """One batched LLM call grading retrieved docs at once (cheaper and
     faster than a call per document) -- returns the indices judged relevant
-    to the question."""
+    to the question.
+
+    Page-index-sourced documents (file_type == "pageindex_section") skip
+    this grading entirely: they already passed a relevance judgment inside
+    vectorless_pageindex.query() (_pick_sections_batch) at query time, so
+    re-grading them here is redundant cost, and a stricter second pass was
+    observed to discard legitimate partial matches for broad questions
+    where the right answer draws on several documents at once rather than
+    one dominant source."""
     documents = state["documents"]
     if not documents:
         return {"documents": [], "no_relevant_docs": True}
 
-    numbered = "\n\n".join(f"[{i}] {d['content'][:500]}" for i, d in enumerate(documents))
+    pre_approved = [d for d in documents if d.get("metadata", {}).get("file_type") == "pageindex_section"]
+    to_grade = [d for d in documents if d.get("metadata", {}).get("file_type") != "pageindex_section"]
+
+    if not to_grade:
+        return {"documents": pre_approved, "no_relevant_docs": len(pre_approved) < MIN_RELEVANT_DOCS}
+
+    numbered = "\n\n".join(f"[{i}] {d['content'][:500]}" for i, d in enumerate(to_grade))
     prompt = (
         "You are grading whether retrieved passages are relevant to a user question.\n"
         f"Question: {state['question']}\n\n"
@@ -296,17 +310,18 @@ def grade_documents(state: GraphState) -> dict[str, Any]:
         # than discarding them -- generate()'s own error handling is the
         # backstop if the outage is total.
         print(f"[ERROR] Document grading failed, passing all retrieved docs through ungraded: {e}")
-        return {"documents": documents, "no_relevant_docs": False}
+        return {"documents": pre_approved + to_grade, "no_relevant_docs": False}
 
     relevant_indices: set[int] = set()
     if response.strip().lower() != "none":
         for tok in response.replace(" ", "").split(","):
             if tok.isdigit():
                 idx = int(tok)
-                if 0 <= idx < len(documents):
+                if 0 <= idx < len(to_grade):
                     relevant_indices.add(idx)
 
-    relevant_docs = [documents[i] for i in sorted(relevant_indices)]
+    graded_relevant = [to_grade[i] for i in sorted(relevant_indices)]
+    relevant_docs = pre_approved + graded_relevant
     return {"documents": relevant_docs, "no_relevant_docs": len(relevant_docs) < MIN_RELEVANT_DOCS}
 
 
