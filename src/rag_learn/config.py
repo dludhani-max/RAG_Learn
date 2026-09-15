@@ -251,12 +251,19 @@ def get_llm_groq_only(temperature: float = 0.0, max_tokens: "int | None" = None,
     "answer with one number" instructions costs more than it's worth for a
     cheap relevance check. Callers at this call site must handle a failure
     themselves (fail open toward inclusion, not exclusion) rather than
-    trusting a slow fallback to save them."""
+    trusting a slow fallback to save them.
+
+    max_retries=0: LangChain's default ChatGroq retries a rate-limited call
+    with backoff before raising -- verified live, this turned a burst of
+    18 rate-limited calls into 343 seconds of stacked "please wait 15-18s"
+    delays instead of failing in under a second each. This call site's
+    whole design already assumes a failure means "skip and move on", so
+    the built-in retry only fights that."""
     from langchain_groq import ChatGroq
 
     from rag_learn import telemetry
 
-    llm = ChatGroq(**llm_kwargs(temperature=temperature, max_tokens=max_tokens)).with_config(
+    llm = ChatGroq(**llm_kwargs(temperature=temperature, max_tokens=max_tokens), max_retries=0).with_config(
         {"tags": ["provider:groq"]}
     )
     return llm.with_config({"callbacks": [telemetry.TelemetryCallback(purpose=purpose)]})
