@@ -64,7 +64,33 @@ def _get_pageindex_picker_llm():
 
 _embedder = None
 
-_TOP_N_CANDIDATES = 8
+# Hard cap on how many individual sections (not documents) ever reach the
+# LLM relevance call -- ranked globally across every candidate document's
+# top-level sections, not per-document. Verified live: ranking at the
+# document level (a fixed number of documents, every one of that document's
+# sections included) still let a single Q&A-style document with hundreds of
+# top-level sections blow past Groq's 7,000-input-tokens-per-minute limit
+# for this model, even after chunking the LLM call into smaller requests --
+# chunking only avoids one oversized request, it does not fix the account's
+# total per-minute throughput ceiling shared across all those chunks. 25
+# short section listings (title + summary) comfortably fits in one call
+# under that budget.
+_TOP_N_SECTIONS = 25
+
+# Coarse first pass: how many documents survive before the expensive
+# section-level embedding step even runs. Verified live: this corpus's 45
+# documents contain 4,378 sections total (Q&A-style documents split into
+# hundreds each) -- embedding all 4,378 against the question took 144.5s on
+# this hardware, blowing the time budget even with zero LLM calls involved.
+# One cheap embedding per document (not per section) first narrows the
+# field before paying the per-section cost only within the survivors.
+_TOP_N_TREES = 15
+
+# Backstop only -- with _TOP_N_SECTIONS this small, the flattened listing
+# should always fit in a single chunk, but this keeps any single call from
+# exceeding Groq's per-minute input-token limit if that assumption ever
+# breaks (e.g. _TOP_N_SECTIONS raised later, or unusually long summaries).
+_BATCH_CHUNK_SIZE = 40
 
 
 def _get_embedder():
@@ -79,38 +105,81 @@ def _get_embedder():
     return _embedder
 
 
-def _prefilter_trees(question: str, tree_paths: List[Path], top_n: int = _TOP_N_CANDIDATES) -> List[Path]:
-    """Local, free, no-LLM-call narrowing of which trees are even worth an
-    LLM look -- cosine similarity between the question and each tree's own
-    top-level section summaries (already written at ingestion), using the
-    same embedding model already loaded for vector search. Verified live:
-    firing an LLM call per tree (45+ trees in this corpus) was the actual
-    bottleneck for an unscoped query (4.5+ minutes, ~130 calls); this step
-    is a single local encode pass plus a numpy comparison, effectively
-    free and near-instant."""
-    if len(tree_paths) <= top_n:
-        return tree_paths
+def _cosine_similarities(question_embedding, candidate_embeddings) -> "Any":
     import numpy as np
+
+    norms = np.linalg.norm(candidate_embeddings, axis=1) * np.linalg.norm(question_embedding) + 1e-9
+    return (candidate_embeddings @ question_embedding) / norms
+
+
+def _prefilter_sections(
+    question: str,
+    tree_paths: List[Path],
+    top_n: int = _TOP_N_SECTIONS,
+    top_n_trees: int = _TOP_N_TREES,
+) -> tuple[Dict[Path, Dict[str, Any]], List[Dict[str, Any]], List[tuple[Path, int]]]:
+    """Local, free, no-LLM-call ranking, in two passes so the expensive pass
+    only runs on a shortlist:
+
+    1. Coarse: one embedding per document (its own top-level summaries,
+       concatenated), batch-encoded together, kept to the top_n_trees most
+       similar documents. Verified live: this corpus's 4,378 total
+       sections took 144.5s to embed individually -- comparing whole
+       documents first (45 embeddings, not 4,378) is cheap enough to run
+       unconditionally and prunes the field before the expensive part.
+    2. Fine: within that shortlist only, rank each individual top-level
+       section directly and keep the top_n most similar OVERALL regardless
+       of which surviving document it came from -- so a single Q&A-style
+       document with many sections still can't flood the LLM listing with
+       only its own sections (see _TOP_N_SECTIONS's docstring).
+
+    Returns (loaded trees by path -- shortlisted ones only, the top_n
+    section dicts, their (tree_path, local_index) origins) so the caller
+    can route an LLM's answer back to the right document without reloading
+    anything."""
+    all_trees = {tp: _load_tree(tp) for tp in tree_paths}
 
     model = _get_embedder()
     question_embedding = model.encode([question])[0]
 
-    scored = []
-    for tp in tree_paths:
-        tree = _load_tree(tp)
-        summary_text = " ".join(s.get("summary") or "" for s in tree.get("sections", []))
-        if not summary_text.strip():
-            scored.append((tp, 0.0))
-            continue
-        tree_embedding = model.encode([summary_text])[0]
-        similarity = float(
-            np.dot(question_embedding, tree_embedding)
-            / (np.linalg.norm(question_embedding) * np.linalg.norm(tree_embedding) + 1e-9)
-        )
-        scored.append((tp, similarity))
+    if len(all_trees) > top_n_trees:
+        tree_items = list(all_trees.items())
+        # Truncated -- verified live: a Q&A-style document with hundreds of
+        # sections, concatenated untruncated, produced a sequence long
+        # enough that the embedding model's attention-mask allocation
+        # crashed outright (RuntimeError: invalid buffer size, 17.56 GiB).
+        # 2000 chars is plenty of signal for "is this document even in the
+        # right topic area" -- the fine section-level pass below is what
+        # actually judges individual sections precisely.
+        tree_texts = [
+            (" ".join(s.get("summary") or "" for s in t.get("sections", [])) or t.get("source_file", ""))[:2000]
+            for _, t in tree_items
+        ]
+        tree_embeddings = model.encode(tree_texts)
+        tree_similarities = _cosine_similarities(question_embedding, tree_embeddings)
+        ranked_tree_idx = sorted(range(len(tree_items)), key=lambda i: tree_similarities[i], reverse=True)[
+            :top_n_trees
+        ]
+        trees = {tree_items[i][0]: tree_items[i][1] for i in ranked_tree_idx}
+    else:
+        trees = all_trees
 
-    scored.sort(key=lambda pair: pair[1], reverse=True)
-    return [tp for tp, _ in scored[:top_n]]
+    flat_sections: List[Dict[str, Any]] = []
+    origin: List[tuple[Path, int]] = []
+    for tp, tree in trees.items():
+        for i, s in enumerate(tree.get("sections", [])):
+            flat_sections.append(s)
+            origin.append((tp, i))
+
+    if len(flat_sections) <= top_n:
+        return trees, flat_sections, origin
+
+    texts = [f"{s['title']}: {s.get('summary') or ''}" for s in flat_sections]
+    section_embeddings = model.encode(texts)
+    similarities = _cosine_similarities(question_embedding, section_embeddings)
+
+    ranked = sorted(range(len(flat_sections)), key=lambda i: similarities[i], reverse=True)[:top_n]
+    return trees, [flat_sections[i] for i in ranked], [origin[i] for i in ranked]
 
 
 def _tree_path(path: Path) -> Path:
@@ -444,9 +513,16 @@ def _pick_sections_batch(question: str, sections: List[Dict[str, Any]]) -> List[
     broad/definitional question (e.g. "What is RAG?") legitimately has a
     paragraph-level answer spread across several different documents rather
     than being any one document's dedicated chapter, and keeping only one
-    match systematically under-serves that case. On failure, keeps every
-    candidate rather than waiting on a slow fallback (see
-    get_llm_groq_only's docstring)."""
+    match systematically under-serves that case.
+
+    On failure, skips this batch (returns no matches from it) rather than
+    keeping every candidate -- verified live: with a large/uneven corpus
+    (some documents split into hundreds of top-level Q&A-style sections
+    rather than a handful of chapters), "keep everything on failure"
+    degraded to returning ~1400 unfiltered results, defeating the entire
+    point of filtering. query() calls this per token-budget-sized chunk
+    (see _BATCH_CHUNK_SIZE), so skipping one failed chunk only drops that
+    slice of candidates, not the whole query's results."""
     if not sections:
         return []
     listing = "\n".join(f"[{i}] {s['title']}: {s['summary']}" for i, s in enumerate(sections))
@@ -462,8 +538,8 @@ def _pick_sections_batch(question: str, sections: List[Dict[str, Any]]) -> List[
     try:
         answer = _get_pageindex_batch_llm().invoke(prompt).content.strip().lower()
     except Exception as e:
-        print(f"[ERROR] Page-index batch section selection failed, keeping all candidates: {e}")
-        return list(range(len(sections)))
+        print(f"[ERROR] Page-index batch section selection failed, skipping this chunk: {e}")
+        return []
     if answer == "none":
         return []
     indices: set[int] = set()
@@ -514,19 +590,74 @@ def _query_tree(question: str, tree_path: Path) -> Optional[Dict[str, Any]]:
 
 
 def query(question: str, tree_paths: Optional[List[Path]] = None) -> List[Dict[str, Any]]:
-    """Navigate each document's tree top-down and return the matched
-    section's full text as retrieved content, shaped like the vector path's
-    output so graph.py's generate() node can consume either uniformly.
-    Each tree's walk is fully independent of every other tree's, so an
-    unscoped ("search everything") query -- which fans out across every
-    page-index tree -- runs them concurrently rather than one document at a
-    time."""
+    """Navigate page-index trees and return matched sections' full text,
+    shaped like the vector path's output so graph.py's generate() node can
+    consume either uniformly.
+
+    Scoped call (tree_paths given, from graph._match_pageindex_tree's
+    "search this document" mode): unchanged behavior, one tree, the
+    existing single-pick walk (_query_tree).
+
+    Unscoped call ("search everything", tree_paths=None): this is the path
+    that was observed live to fire 45+ individual LLM calls and take 4.5+
+    minutes. A free local-embedding prefilter ranks every candidate
+    document's individual sections directly and keeps only the top
+    _TOP_N_SECTIONS overall (_prefilter_sections -- NOT a fixed number of
+    documents, since a handful of Q&A-style documents in this corpus split
+    into hundreds of top-level sections each, which blew past Groq's
+    per-minute token budget when document-level shortlisting was tried).
+    ONE batched LLM call across that shortlist (_pick_sections_batch)
+    returns every plausibly relevant match, not just one -- letting several
+    different documents' perspectives on the same topic survive into
+    generate()."""
     candidates = tree_paths if tree_paths is not None else list_trees()
     if not candidates:
         return []
+
+    if tree_paths is not None:
+        with ThreadPoolExecutor(max_workers=_LLM_CONCURRENCY) as pool:
+            results = pool.map(lambda tp: _query_tree(question, tp), candidates)
+        return [r for r in results if r is not None]
+
+    trees, flat_sections, origin = _prefilter_sections(question, candidates)
+
+    # Chunk the (already small, _TOP_N_SECTIONS-capped) listing so no single
+    # call exceeds Groq's per-minute input-token limit -- a backstop, not
+    # the primary defense (see _BATCH_CHUNK_SIZE's comment).
+    chunk_starts = list(range(0, len(flat_sections), _BATCH_CHUNK_SIZE))
     with ThreadPoolExecutor(max_workers=_LLM_CONCURRENCY) as pool:
-        results = pool.map(lambda tp: _query_tree(question, tp), candidates)
-    return [r for r in results if r is not None]
+        chunk_results = pool.map(
+            lambda start: _pick_sections_batch(question, flat_sections[start : start + _BATCH_CHUNK_SIZE]),
+            chunk_starts,
+        )
+    matched_indices = [
+        start + local_idx for start, local_indices in zip(chunk_starts, chunk_results) for local_idx in local_indices
+    ]
+
+    results: List[Dict[str, Any]] = []
+    for idx in matched_indices:
+        tp, _ = origin[idx]
+        section = flat_sections[idx]
+        tree = trees[tp]
+        children = section.get("children")
+        if children:
+            # Bounded, low-volume (at most _TOP_N_SECTIONS of these) --
+            # the existing single-pick walk is fine at this depth.
+            child_idx = _pick_section(question, children)
+            section = children[child_idx] if child_idx is not None else section
+        results.append(
+            {
+                "content": section["text"],
+                "metadata": {
+                    "source_file": tree.get("source_file", tp.name),
+                    "file_type": "pageindex_section",
+                    "page": section.get("page_start", -1),
+                    "section_title": section["title"],
+                },
+                "score": None,
+            }
+        )
+    return results
 
 
 __all__ = ["ROUTING_PAGEINDEX", "build_tree", "delete_tree", "list_trees", "query"]
