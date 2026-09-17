@@ -358,12 +358,20 @@ def generate(state: GraphState) -> dict[str, Any]:
             "sources": [],
         }
 
-    context = "\n\n".join(f"[{i}] {d['content']}" for i, d in enumerate(documents))
+    # No per-chunk citation markers -- sources are attached separately below
+    # from document metadata, so labeling chunks here (e.g. "[0]", "[1]")
+    # only invited the model to enumerate them back ("snippet 1 says...,
+    # snippet 2 says...") instead of synthesizing one answer.
+    context = "\n\n".join(d["content"] for d in documents)
     prompt = (
         "Answer the question using ONLY the context below -- never use outside knowledge or "
         "anything not explicitly stated in this context, even if you know the answer from "
         "elsewhere. If the context doesn't contain the answer, say so explicitly rather than "
         "filling the gap yourself.\n\n"
+        "Synthesize a single, well-organized answer -- do not describe or enumerate the context "
+        "pieces themselves (e.g. never say things like \"the first passage says\" or \"snippet "
+        "2 covers\"). Use markdown formatting where it aids clarity: short paragraphs, bullet "
+        "points for lists, and a table or side-by-side bullets when comparing multiple things.\n\n"
         f"Context:\n{context}\n\n"
         f"Question: {state['original_question']}\n\nAnswer:"
     )
