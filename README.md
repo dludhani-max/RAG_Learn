@@ -15,25 +15,41 @@ Three different jobs, three different kinds of model:
   rule (`RecursiveCharacterTextSplitter`) that cuts text into ~1750-character pieces with a little
   overlap so context isn't lost at the seams.
 - **Embedding** (turning text into a "meaning fingerprint" so similar ideas can be matched):
-  `Qwen/Qwen3-Embedding-0.6B`. Runs **locally on your machine**, not through any API — free, no
-  tokens, no internet call.
+  `Qwen/Qwen3-Embedding-0.6B` — a 0.6-billion-parameter model, ~1.5GB on first download. Runs
+  **locally on your machine**, not through any API — free, no tokens, no internet call.
 - **Retrieval** (finding the right content for a question) uses one of three paths depending on the
   document, only one of which needs the LLM:
   - Plain text/PDFs → **semantic search**: the embedding model above finds similar-meaning chunks,
-    then a second local model (`BAAI/bge-reranker-v2-m3`, also free/local) double-checks which ones
-    truly fit best.
+    then a second local model (`BAAI/bge-reranker-v2-m3`, a ~568M-parameter cross-encoder, also
+    free/local) double-checks which ones truly fit best.
   - Spreadsheets/tables → the LLM **writes a database query**, which then runs directly against the
     data (no embedding involved).
-  - Long structured documents (books, guides) → the LLM **picks the right chapter** from a set of
-    summaries, then reads that chapter directly (no embedding involved).
+  - Long structured documents (books, guides) → a free local pre-filter (the embedding model above,
+    scoring document- then section-level summaries) narrows the field, then one batched LLM call
+    **picks the right section(s)** from that shortlist and reads them directly (no full-corpus
+    embedding involved).
 - **Everything that requires actually understanding, deciding, writing, or judging language** goes
-  through Groq, currently `qwen/qwen3.6-27b` (`RAG_GROQ_MODEL_NAME` to change it) — this is the only
-  part of the pipeline that costs API tokens or calls out over the internet. Concretely, that's:
-  checking a question is safe to answer, picking the right chapter (page-index) or writing SQL
-  (tabular data), judging whether what was retrieved is actually relevant, rewriting the question
-  and retrying if not, writing the final answer, and checking that answer isn't fabricated or
-  inappropriate before it's shown to you. See "Guardrails" and "Vectorless retrieval" below for the
-  full detail on each of these steps.
+  through Groq — two models, picked per call site by cost/latency tradeoff, both overridable via env
+  vars:
+  - `qwen/qwen3.8-27b` (`RAG_GROQ_MODEL_NAME`, ~27B parameters) — the default for generation and
+    most judging: checking a question is safe to answer, writing SQL (tabular data), judging
+    whether what was retrieved is actually relevant, rewriting the question and retrying if not,
+    writing the final answer, and checking that answer isn't fabricated or inappropriate before
+    it's shown to you.
+  - `groq/compound-mini` — used only for the page-index batched section-pick call, which fires in a
+    short burst per unscoped query; a smaller/faster model here keeps that burst from becoming the
+    latency bottleneck, and it's called through a no-fallback client (`get_llm_groq_only`) since a
+    bursty volume of calls would otherwise saturate a fallback tier just as badly as Groq itself.
+  This Groq usage is the only part of the pipeline that costs API tokens or calls out over the
+  internet. See "Guardrails" and "Vectorless retrieval" below for the full detail on each step.
+
+**Intended scale:** this is built and tuned for **personal or small-team** document sets (tens to
+low hundreds of files) — not an enterprise document store. The unscoped "search everything" query
+path fans out across every SQL table and page-index tree in the corpus (see "Vectorless retrieval"
+below), so its cost scales with *how many separate documents* you've ingested, not with total corpus
+size in general. At personal scale this stays well under the 30-second target; a corpus with
+hundreds of separately-routed documents would need re-tuning (e.g. `_TOP_N_TREES`/`_TOP_N_SECTIONS`
+in `vectorless_pageindex.py`) before it'd still feel fast.
 
 ## Quick Start
 
@@ -66,7 +82,7 @@ evaluation framework) — worth reading once you're past first setup, not requir
 2. Install Python dependencies (uv-managed): `uv sync`
 3. Copy `.env.example` to `.env` and fill in your keys:
    - `GROQ_API_KEY` — **required**, the only key the app checks for on startup. Used for generation and every LLM-judge step (grading, guardrails, classification). Get one at https://console.groq.com/keys
-   - `LANGSMITH_API_KEY` — optional. Without it the app runs fine; with it, every query gets traced (retrieve/grade/generate step-by-step, viewable in the LangSmith dashboard) and the evaluation framework (see below) can log experiments. Get one at https://smith.langchain.com
+   - `LANGSMITH_API_KEY` — optional. Without it the app runs fine; with it, every query gets traced (retrieve/grade/generate step-by-step, viewable in the LangSmith dashboard) and the evaluation framework (see below) can log experiments. Get one at https://smith.langchain.com. Tracing is scoped to whichever key is in your own `.env` — each LangSmith account has its own monthly trace quota, and tracing failures (e.g. quota exceeded) are logged but never block a query from answering; if you see `LangSmithRateLimitError` in the logs, that's just your account's trace quota, not an app bug.
    - `OPENAI_API_KEY` / `GOOGLE_API_KEY` — optional, only needed if you switch providers later.
 4. `.env` is gitignored — never commit real keys. `.env.example` stays tracked with placeholders only.
 
