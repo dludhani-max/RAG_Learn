@@ -178,6 +178,13 @@ hit the cache too (verified: "What programming languages does Deepak know?" and 
 languages is Deepak familiar with?" matched at similarity 0.960). A successful `generate` always
 writes its answer back to the cache via a `store_cache` node.
 
+A rejection from either output guardrail (groundedness or toxicity, see below) is **never** cached,
+even though `output_guardrail` still returns a fixed safe message the same shape as a real answer —
+a guardrail judgment can be wrong (a false-negative groundedness rejection on a genuinely correct
+answer), and caching that mistake would make it permanent: every future similar question would keep
+replaying the same stale rejection instead of getting a fresh judgment. Only an answer that actually
+passed both guardrails is worth reusing.
+
 The cache is automatically wiped by `sync()` whenever the document set actually changes (add,
 update, remove, or an auto-replaced version — a rename alone doesn't, since the content is
 unchanged) — a stale cached answer being served silently would be worse than a cache miss, so
@@ -278,9 +285,12 @@ lifecycle (dropping a DuckDB table or deleting a tree file, the same way it dele
 - **Page-index path** (`vectorless_pageindex.py`): each structured document gets a one-time tree of
   sections built at ingestion -- a PDF's own bookmark/outline when it has one (exact page ranges), or
   a heading-line split (the same heuristic that routed it here in the first place) otherwise. Each
-  section gets a short LLM summary. At query time, one LLM call picks the single most relevant
-  section from the summaries (or none, if nothing fits) and its full text is returned -- no embedding
-  similarity involved.
+  section gets a short LLM summary; a chapter split into many children instead gets a summary built
+  from their titles, capped at 500 characters -- verified live, one chapter split into 755 children
+  produced an 11,544-character uncapped summary, and several such oversized summaries in one batched
+  prompt blew past Groq's per-minute input-token limit outright. At query time, one LLM call picks
+  the single most relevant section from the summaries (or none, if nothing fits) and its full text
+  is returned -- no embedding similarity involved.
 
 Both are exposed through `run_query(question, target_document=...)`: passing a filename (via the
 Streamlit Chat page's "Scope" picker, or directly) scopes retrieval to that one document (matched
@@ -334,6 +344,31 @@ A real run surfaced a genuine finding, not just noise: several correct answers s
 of characters covering many subtopics) for a single-paragraph question -- the answer was right, but
 most of the retrieved context was irrelevant filler. That's a legitimate signal about page-index
 granularity, exactly what this framework exists to surface.
+
+### Rating-based golden dataset promotion
+
+A second path into the golden dataset, alongside `golden_dataset.py`'s LLM-drafted candidates: real
+Chat answers a user actually rated highly.
+
+```
+uv run python3 -m rag_learn.eval.promote_candidates   # -> data/vector_store/eval/rating_promoted_candidates.json
+# --- review this file by hand, same as golden_dataset_draft.json ---
+```
+
+Every Chat answer is persisted (question, answer, sources) the moment it's generated
+(`ratings.record_exchange`), and the star-rating widget under each answer attaches a 1-5 score to
+it. `promote_candidates.py` pulls every exchange rated 4-5 stars and not yet promoted
+(`ratings.list_promotable`), and for each one, an **independent judge LLM** -- OpenRouter's free
+`nvidia/nemotron-3-super-120b-a12b:free`, deliberately a different provider than Groq (which
+answers every real question) -- re-verifies the answer against its retrieved context and drafts a
+clean `ground_truth`, rather than promoting the user's approved wording verbatim. This catches a
+generous rating on a subtly imprecise answer, and flags (`verified: false`) any case where the
+retrieved context doesn't actually support a confident answer at all.
+
+A real user rating a real answer is arguably a stronger signal than a synthetic question -- but per
+this project's review discipline, nothing merges into the actual golden set without a human looking
+at it first. `promote_candidates.py`'s output is a separate pending-review file, never merged
+directly into `golden_dataset_draft.json`.
 
 ### Streamlit UI
 
