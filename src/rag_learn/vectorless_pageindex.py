@@ -421,7 +421,16 @@ def build_tree(path: Path, docs: List[Document]) -> str:
             # its summary never mentioned them. Building the summary from
             # the child list instead is free (no extra LLM call) and exact,
             # since it's just the topics we already split out.
-            topics = "; ".join(child["title"].split(" — ")[-1] for child in children)
+            # Capped at 500 chars -- verified live: a chapter split into
+            # hundreds of children (e.g. 755, for a densely-headed PDF)
+            # produced an 11,544-char uncapped summary for that one section
+            # alone, and several such sections surviving into the
+            # prefiltered shortlist blew _pick_sections_batch's prompt past
+            # Groq's per-minute input-token limit outright (413, "Requested
+            # 91584" against a 7000 limit). A truncated topic list is still
+            # useful signal for the navigator; an exhaustive one isn't worth
+            # the token cost.
+            topics = "; ".join(child["title"].split(" — ")[-1] for child in children)[:500]
             nodes.append(
                 {
                     "title": s["title"],
@@ -530,7 +539,11 @@ def _pick_sections_batch(question: str, sections: List[Dict[str, Any]]) -> List[
     slice of candidates, not the whole query's results."""
     if not sections:
         return []
-    listing = "\n".join(f"[{i}] {s['title']}: {s['summary']}" for i, s in enumerate(sections))
+    # Backstop, not the primary defense (see build_tree's 500-char cap on
+    # the "Covers: ..." summary it constructs) -- protects this listing
+    # even against an existing tree built before that cap existed, or any
+    # other future source of an oversized summary.
+    listing = "\n".join(f"[{i}] {s['title']}: {(s['summary'] or '')[:500]}" for i, s in enumerate(sections))
     prompt = (
         "Given the question and this list of document sections, respond with ONLY a "
         "comma-separated list of the bracketed index numbers of every section that looks "
