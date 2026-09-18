@@ -7,14 +7,14 @@ review discipline (golden_dataset.py's draft-then-review flow), nothing
 merges into the real golden set without a human looking at it first --
 this script's output is a pending-review file, not the golden set itself.
 
-An independent judge (Anthropic, via config.get_independent_judge_llm --
-deliberately not whatever provider actually answered the original
-question) drafts a clean ground_truth from the question + retrieved
-context, rather than just promoting the original answer's own wording
-verbatim. This catches cases where a user's high rating was generous
-despite a subtly imprecise phrasing, and flags (via `verified: false`)
-cases where the retrieved context doesn't actually support a confident
-answer at all.
+An independent judge (OpenRouter's free Nemotron model, via
+config.get_independent_judge_llm -- deliberately not Groq, whatever
+provider actually answered the original question) drafts a clean
+ground_truth from the question + retrieved context, rather than just
+promoting the original answer's own wording verbatim. This catches cases
+where a user's high rating was generous despite a subtly imprecise
+phrasing, and flags (via `verified: false`) cases where the retrieved
+context doesn't actually support a confident answer at all.
 
 Usage: uv run python3 -m rag_learn.eval.promote_candidates
 """
@@ -63,7 +63,7 @@ def _draft_ground_truth(judge, question: str, answer: str, contexts: list[str]) 
 def promote_candidates(min_rating: int = 4) -> list[dict]:
     judge = config.get_independent_judge_llm(temperature=0.0, max_tokens=500, purpose="rating_promotion_judge")
     if judge is None:
-        print("[PROMOTE] No independent judge available (ANTHROPIC_API_KEY not set) -- nothing promoted.")
+        print("[PROMOTE] No independent judge available (OPENROUTER_API_KEY not set) -- nothing promoted.")
         return []
 
     exchanges = ratings.list_promotable(min_rating=min_rating)

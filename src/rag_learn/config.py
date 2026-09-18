@@ -283,32 +283,43 @@ def get_independent_judge_llm(temperature: float = 0.0, max_tokens: "int | None"
     """A judge LLM deliberately NOT sharing a provider with get_llm()'s
     primary (Groq) -- for use where grading/validating a candidate
     independently of whatever model actually produced it matters (see
-    eval/promote_candidates.py: an Anthropic call cross-checks a
+    eval/promote_candidates.py: an outside call cross-checks a
     highly-rated Chat answer before it becomes a golden-dataset candidate,
     rather than trusting the same model's own output as its own ground
-    truth). Returns None if ANTHROPIC_API_KEY isn't set, rather than
-    silently falling back to Groq -- that would defeat the point of asking
-    for an outside opinion, so callers must handle the None case
-    explicitly (e.g. skip promotion, tell the user why) rather than
-    treating this the way get_llm()'s optional tiers degrade.
+    truth). Uses OpenRouter's free Nemotron model directly (not the
+    Groq-primary fallback chain in get_llm() -- that would route through
+    Groq first, defeating the point) -- a real second opinion at no cost,
+    since the app's paid Anthropic tier was deliberately removed. Returns
+    None if OPENROUTER_API_KEY isn't set, rather than silently falling back
+    to Groq -- that would defeat the point of asking for an outside
+    opinion, so callers must handle the None case explicitly (e.g. skip
+    promotion, tell the user why) rather than treating this the way
+    get_llm()'s optional tiers degrade.
     """
-    if not ANTHROPIC_API_KEY:
+    if not OPENROUTER_API_KEY:
         return None
-    from langchain_anthropic import ChatAnthropic
+    from langchain_openai import ChatOpenAI
 
     from rag_learn import telemetry
 
-    llm = ChatAnthropic(
-        model=ANTHROPIC_MODEL_NAME,
+    # Nemotron (120B), not the other free tier (LFM-2.5, 2.6B) -- too small
+    # to trust as a judge. Same reasoning-padding need as get_llm()'s
+    # OpenRouter stage: Nemotron accepts `reasoning: {enabled: false}` and
+    # drops to 0 reasoning tokens, but pad anyway for safety since these
+    # are free tokens.
+    _INDEPENDENT_JUDGE_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+    llm = ChatOpenAI(
+        model=_INDEPENDENT_JUDGE_MODEL,
         temperature=temperature,
-        max_tokens=max_tokens or 1024,
-        api_key=ANTHROPIC_API_KEY,
-    ).with_config({"tags": ["provider:anthropic"]})
-    # primary_provider="anthropic" here (not the TelemetryCallback default
-    # of "groq") -- this call was never a fallback from anything, Anthropic
+        max_tokens=(max_tokens or 1024) + 300,
+        api_key=OPENROUTER_API_KEY,
+        base_url=OPENROUTER_BASE_URL,
+    ).with_config({"tags": ["provider:openrouter"]})
+    # primary_provider="openrouter" here (not the TelemetryCallback default
+    # of "groq") -- this call was never a fallback from anything, OpenRouter
     # IS the intended provider for this purpose, and mislabeling it
     # is_fallback=True would misrepresent the fallback-rate metric on the
     # Insights page.
     return llm.with_config(
-        {"callbacks": [telemetry.TelemetryCallback(purpose=purpose, primary_provider="anthropic")]}
+        {"callbacks": [telemetry.TelemetryCallback(purpose=purpose, primary_provider="openrouter")]}
     )
