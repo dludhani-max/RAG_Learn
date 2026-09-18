@@ -51,6 +51,36 @@ size in general. At personal scale this stays well under the 30-second target; a
 hundreds of separately-routed documents would need re-tuning (e.g. `_TOP_N_TREES`/`_TOP_N_SECTIONS`
 in `vectorless_pageindex.py`) before it'd still feel fast.
 
+## Why it's built this way, in plain terms
+
+A few design choices that aren't obvious just from reading the code, explained simply:
+
+- **Search happens in two steps, not one.** The first pass is fast but rough — it just compares
+  "does this look similar" across everything. The second pass is slower but much more careful — it
+  looks closely at only the top candidates from the first pass and re-checks each one properly
+  against the actual question. Doing the careful check on everything would be too slow; doing only
+  the rough check would miss things. Two steps gets both speed and accuracy.
+
+- **The app double-checks its own search results before answering.** If the first search comes back
+  empty or off-topic, the app doesn't just give up (or worse, guess) — it rewrites the question in a
+  different way and searches again, up to a couple of extra tries. Only after that does it accept
+  "nothing relevant found" as the final answer, and it says so honestly instead of making something
+  up.
+
+- **Different document types are searched in different ways, on purpose.** Cramming everything
+  through the same search method loses information: a spreadsheet's rows and columns don't make
+  sense as a chunk of text, and a whole book doesn't fit into one small search result. So tables get
+  their own database lookup, long structured documents get their own outline-based search, and
+  everything else uses the general text search. Each document is searched the way that actually
+  fits its shape.
+
+- **A new idea was tested before being added, and it turned out not to help.** Adding a second,
+  different search method (matching exact words instead of just meaning) was a real, live-tested
+  question — not just adopted because it's a common technique. The test showed the app's existing
+  two-step search already handled tricky cases (like acronyms) well once both steps were properly
+  compared, so the extra complexity wasn't added. Proving something doesn't help is still a useful
+  result, not a wasted one.
+
 ## Quick Start
 
 **Prerequisites:** Python 3.14+, [`uv`](https://docs.astral.sh/uv/), a free [Groq API key](https://console.groq.com/keys).
