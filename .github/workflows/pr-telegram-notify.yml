@@ -1,0 +1,31 @@
+# pull_request_target (not pull_request) -- needed so this fires with
+# secrets access even for PRs from forks, which is the whole point here.
+# Safe: this job never checks out or runs any code from the PR branch,
+# only reads event metadata (title/author/url), so a malicious fork PR
+# can't use it to exfiltrate the Telegram token.
+name: Notify Telegram on new PR
+
+on:
+  pull_request_target:
+    types: [opened]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Telegram message
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          TEXT="New PR #${PR_NUMBER} on RAG_Learn
+          From: ${PR_AUTHOR}
+          Title: ${PR_TITLE}
+          ${PR_URL}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode text="${TEXT}"
