@@ -444,11 +444,17 @@ def output_guardrail(state: GraphState) -> dict[str, Any]:
 
     is_grounded, ungrounded_message = guardrails.check_groundedness(answer, context)
     if not is_grounded:
-        return {"generation": ungrounded_message, "sources": []}
+        # _skip_cache=True -- the groundedness judge can be wrong (a false
+        # negative on a genuinely correct answer), and caching a rejection
+        # would make that mistake permanent: every future similar question
+        # would keep replaying the same stale block instead of getting a
+        # fresh judgment. Only a successfully generated, verified answer is
+        # worth caching.
+        return {"generation": ungrounded_message, "sources": [], "_skip_cache": True}
 
     is_non_toxic, toxic_message = guardrails.check_output_toxicity(answer)
     if not is_non_toxic:
-        return {"generation": toxic_message, "sources": []}
+        return {"generation": toxic_message, "sources": [], "_skip_cache": True}
 
     return {}
 
