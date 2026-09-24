@@ -8,7 +8,7 @@ merges into the real golden set without a human looking at it first --
 this script's output is a pending-review file, not the golden set itself.
 
 An independent judge (OpenRouter's free Nemotron model, via
-config.get_independent_judge_llm -- deliberately not Groq, whatever
+llm_factory.default_factory.get_independent_judge -- deliberately not Groq, whatever
 provider actually answered the original question) drafts a clean
 ground_truth from the question + retrieved context, rather than just
 promoting the original answer's own wording verbatim. This catches cases
@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 from rag_learn import config, ratings
+from rag_learn.llm_factory import default_factory
 
 PENDING_PATH = Path(config.VECTOR_STORE_DIR) / "eval" / "rating_promoted_candidates.json"
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
@@ -61,7 +62,7 @@ def _draft_ground_truth(judge, question: str, answer: str, contexts: list[str]) 
 
 
 def promote_candidates(min_rating: int = 4) -> list[dict]:
-    judge = config.get_independent_judge_llm(temperature=0.0, max_tokens=500, purpose="rating_promotion_judge")
+    judge = default_factory.get_independent_judge(temperature=0.0, max_tokens=500, purpose="rating_promotion_judge")
     if judge is None:
         print("[PROMOTE] No independent judge available (OPENROUTER_API_KEY not set) -- nothing promoted.")
         return []

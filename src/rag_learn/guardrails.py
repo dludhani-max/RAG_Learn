@@ -35,23 +35,15 @@ from langchain.agents.middleware.pii import (
     detect_url,
 )
 
-from rag_learn import config
+from rag_learn.llm_factory import default_factory
 
 NO_RELATED_ANSWER_MESSAGE = "No related answers found."
 
-_guardrail_llm = None
-
-
-def _get_guardrail_llm():
-    global _guardrail_llm
-    if _guardrail_llm is None:
-        # max_tokens caps the requested output ceiling, not just actual
-        # generation length -- verified live in eval/metrics.py's judge
-        # calls (same one-word-answer pattern as these) that Groq can
-        # reject a call outright for requesting far more output headroom
-        # than a single-word classification needs.
-        _guardrail_llm = config.get_llm(temperature=0.0, max_tokens=20, purpose="guardrail")
-    return _guardrail_llm
+# max_tokens=20 on every guardrail call: it caps the requested output ceiling,
+# not just actual generation length -- verified live in eval/metrics.py's judge
+# calls (same one-word-answer pattern as these) that Groq can reject a call
+# outright for requesting far more output headroom than a single-word
+# classification needs.
 
 
 # --- PII redaction -----------------------------------------------------------
@@ -127,7 +119,7 @@ def check_input_safety(question: str) -> tuple[bool, Optional[str]]:
         f"Question: {question}\n\nClassification:"
     )
     try:
-        answer = _normalize_verdict(_get_guardrail_llm().invoke(prompt).content)
+        answer = _normalize_verdict(default_factory.get("guardrail", temperature=0.0, max_tokens=20).invoke(prompt).content)
     except Exception as e:
         print(f"[ERROR] Input safety check failed, defaulting to SAFE (fail-open): {e}")
         return True, None
@@ -156,7 +148,7 @@ def check_groundedness(answer: str, context: str) -> tuple[bool, Optional[str]]:
         f"Answer:\n{answer}\n\nClassification:"
     )
     try:
-        verdict = _normalize_verdict(_get_guardrail_llm().invoke(prompt).content)
+        verdict = _normalize_verdict(default_factory.get("guardrail", temperature=0.0, max_tokens=20).invoke(prompt).content)
     except Exception as e:
         print(f"[ERROR] Groundedness check failed, defaulting to GROUNDED (fail-open): {e}")
         return True, None
@@ -178,7 +170,7 @@ def check_output_toxicity(answer: str) -> tuple[bool, Optional[str]]:
         f"Text:\n{answer}\n\nClassification:"
     )
     try:
-        verdict = _normalize_verdict(_get_guardrail_llm().invoke(prompt).content)
+        verdict = _normalize_verdict(default_factory.get("guardrail", temperature=0.0, max_tokens=20).invoke(prompt).content)
     except Exception as e:
         print(f"[ERROR] Toxicity check failed, defaulting to SAFE (fail-open): {e}")
         return True, None

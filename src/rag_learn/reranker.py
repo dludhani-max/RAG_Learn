@@ -4,14 +4,6 @@ from sentence_transformers import CrossEncoder
 
 from rag_learn import config
 
-# Caps how many of the final top_k slots a single source document can fill.
-# Verified live: with no cap, plain score-sorting let one document's chunks
-# fill every slot even in "search everything" mode, silently starving other
-# genuinely relevant documents out of the answer -- working against this
-# app's whole point of helping a user learn from everything relevant in the
-# corpus, not just whichever single document scored marginally higher.
-MAX_PER_SOURCE = 3
-
 
 class Reranker:
     """Cross-encoder reranker: scores each (query, chunk) pair jointly,
@@ -42,7 +34,7 @@ class Reranker:
         leftover: list[tuple[dict[str, Any], float]] = []
         for doc, score in scored:
             source = doc.get("metadata", {}).get("source_file", "")
-            if per_source_count.get(source, 0) < MAX_PER_SOURCE:
+            if per_source_count.get(source, 0) < config.MAX_PER_SOURCE:
                 selected.append((doc, score))
                 per_source_count[source] = per_source_count.get(source, 0) + 1
             else:

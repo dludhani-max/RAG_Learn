@@ -19,7 +19,7 @@ from typing import List, Optional
 import pymupdf
 from langchain_core.documents import Document
 
-from rag_learn import config
+from rag_learn.llm_factory import default_factory
 
 ROUTING_VECTOR = "vector"
 ROUTING_SQL = "vectorless_sql"
@@ -58,20 +58,6 @@ SENTENCE_END_RE = re.compile(r"[.!?]\s*$")
 # lines with widely varying token counts and few explicit delimiters.
 _TABLE_DELIMITER_RE = re.compile(r"[\t|]|(?: {2,})")
 _MIN_LINES_FOR_TABLE_HEURISTIC = 3
-
-_classification_llm = None
-
-
-def _get_classification_llm():
-    """Lazy singleton, same pattern as graph.py's _Clients -- avoids paying
-    LangChain/Groq client init cost for corpora with no ambiguous images."""
-    global _classification_llm
-    if _classification_llm is None:
-        # max_tokens: see guardrails.py's identical fix -- a one-word
-        # classification call can otherwise request far more output
-        # headroom than needed and get rejected by Groq's output-token quota.
-        _classification_llm = config.get_llm(temperature=0.0, max_tokens=20, purpose="classification")
-    return _classification_llm
 
 
 def _has_pdf_toc(path: Path) -> bool:
@@ -130,7 +116,10 @@ def _classify_image_with_llm(text: str) -> str:
         f"Text:\n{text[:2000]}\n\nClassification:"
     )
     try:
-        answer = _get_classification_llm().invoke(prompt).content.strip().lower()
+        # max_tokens: a one-word classification call can otherwise request far
+        # more output headroom than needed and get rejected by Groq's quota.
+        llm = default_factory.get("classification", temperature=0.0, max_tokens=20)
+        answer = llm.invoke(prompt).content.strip().lower()
     except Exception as e:
         print(f"[ERROR] Image classification LLM call failed, defaulting to vector: {e}")
         return ROUTING_VECTOR

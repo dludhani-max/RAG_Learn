@@ -14,6 +14,7 @@ from typing import Any, Dict, Iterator, List, Optional
 import duckdb
 
 from rag_learn import config
+from rag_learn.llm_factory import default_factory
 from rag_learn.classifier import ROUTING_SQL
 
 DB_PATH = Path(config.VECTOR_STORE_DIR) / "vectorless.duckdb"
@@ -137,14 +138,6 @@ def _is_read_only_select(sql: str) -> bool:
     return bool(_READ_ONLY_START_RE.match(stripped))
 
 
-_sql_llm = None
-
-
-def _get_sql_llm():
-    global _sql_llm
-    if _sql_llm is None:
-        _sql_llm = config.get_llm(temperature=0.0, purpose="sql_generation")
-    return _sql_llm
 
 
 def _strip_code_fence(text: str) -> str:
@@ -165,7 +158,7 @@ def _generate_sql(question: str, table: str, schema: str) -> str:
         f"Question: {question}\n\nSQL:"
     )
     try:
-        raw = _get_sql_llm().invoke(prompt).content
+        raw = default_factory.get("sql_generation", temperature=0.0).invoke(prompt).content
     except Exception as e:
         print(f"[ERROR] SQL generation LLM call failed for table '{table}': {e}")
         return ""
