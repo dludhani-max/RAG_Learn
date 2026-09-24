@@ -18,6 +18,7 @@ import pymupdf
 from langchain_core.documents import Document
 
 from rag_learn import config
+from rag_learn.llm_factory import default_factory
 from rag_learn.classifier import ROUTING_PAGEINDEX, HEADING_LINE_RE, SENTENCE_END_RE
 
 TREES_DIR = Path(config.VECTOR_STORE_DIR) / "pageindex"
@@ -36,30 +37,12 @@ MAX_WALK_DEPTH = 3
 # faster 429s.
 _LLM_CONCURRENCY = 4
 
-_pageindex_llm = None
-_pageindex_picker_llm = None
-
-
-def _get_pageindex_llm():
-    # Used for _summarize(): asked for 1-2 sentences, so needs more room
-    # than the picker below.
-    global _pageindex_llm
-    if _pageindex_llm is None:
-        _pageindex_llm = config.get_llm(temperature=0.0, max_tokens=150, purpose="pageindex_summarize")
-    return _pageindex_llm
-
-
-def _get_pageindex_picker_llm():
-    # Used for _pick_section(): the answer is just a section number (or
-    # "none"). Verified live: leaving max_tokens unset let ChatGroq default
-    # to ~2048, and Groq's output-tokens-per-minute limit is enforced
-    # against the *declared* max_tokens, not actual usage -- an uncapped
-    # request got rejected outright (429) even though the real answer is a
-    # couple of characters.
-    global _pageindex_picker_llm
-    if _pageindex_picker_llm is None:
-        _pageindex_picker_llm = config.get_llm(temperature=0.0, max_tokens=20, purpose="pageindex_pick")
-    return _pageindex_picker_llm
+# LLM budgets: _summarize() asks for 1-2 sentences (max_tokens=150);
+# _pick_section() answers with just a section number or "none"
+# (max_tokens=20). Verified live: leaving max_tokens unset let ChatGroq default
+# to ~2048, and Groq's output-tokens-per-minute limit is enforced against the
+# *declared* max_tokens, not actual usage -- an uncapped request got rejected
+# outright (429) even though the real answer is a couple of characters.
 
 
 _embedder = None
@@ -202,7 +185,7 @@ def _summarize(text: str, title: str) -> str:
         f"Section title: {title}\n\nSection text:\n{text[:3000]}\n\nSummary:"
     )
     try:
-        return _get_pageindex_llm().invoke(prompt).content.strip()
+        return default_factory.get("pageindex_summarize", temperature=0.0, max_tokens=150).invoke(prompt).content.strip()
     except Exception as e:
         print(f"[ERROR] Page-index summarization failed for section '{title}': {e}")
         return text[:200]
@@ -495,7 +478,7 @@ def _pick_section(question: str, sections: List[Dict[str, Any]]) -> Optional[int
         f"Sections:\n{listing}\n\nQuestion: {question}\n\nAnswer:"
     )
     try:
-        answer = _get_pageindex_picker_llm().invoke(prompt).content.strip().lower()
+        answer = default_factory.get("pageindex_pick", temperature=0.0, max_tokens=20).invoke(prompt).content.strip().lower()
     except Exception as e:
         print(f"[ERROR] Page-index section selection failed: {e}")
         return None
@@ -506,18 +489,9 @@ def _pick_section(question: str, sections: List[Dict[str, Any]]) -> Optional[int
     return idx if 0 <= idx < len(sections) else None
 
 
-_pageindex_batch_llm = None
-
-
-def _get_pageindex_batch_llm():
-    global _pageindex_batch_llm
-    if _pageindex_batch_llm is None:
-        # No fallback chain (get_llm_groq_only) -- see _pick_sections_batch's
-        # docstring for why a slow free-model fallback isn't worth it here.
-        _pageindex_batch_llm = config.get_llm_groq_only(
-            temperature=0.0, max_tokens=60, purpose="pageindex_batch_pick"
-        )
-    return _pageindex_batch_llm
+# The batch pick uses get_groq_only (no fallback chain) -- see
+# _pick_sections_batch's docstring for why a slow free-model fallback isn't
+# worth it here.
 
 
 def _pick_sections_batch(question: str, sections: List[Dict[str, Any]]) -> List[int]:
@@ -554,7 +528,7 @@ def _pick_sections_batch(question: str, sections: List[Dict[str, Any]]) -> List[
         f"Sections:\n{listing}\n\nQuestion: {question}\n\nAnswer:"
     )
     try:
-        answer = _get_pageindex_batch_llm().invoke(prompt).content.strip().lower()
+        answer = default_factory.get_groq_only("pageindex_batch_pick", temperature=0.0, max_tokens=60).invoke(prompt).content.strip().lower()
     except Exception as e:
         print(f"[ERROR] Page-index batch section selection failed, skipping this chunk: {e}")
         return []

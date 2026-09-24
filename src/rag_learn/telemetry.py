@@ -1,5 +1,5 @@
 """Local token/cost telemetry for every LLM call across both providers
-(Groq primary, Anthropic fallback -- see config.get_llm()). Captured via a
+(Groq primary, Anthropic fallback -- see llm_factory.py). Captured via a
 LangChain callback attached at the one central construction point, so no
 individual call site needs to know telemetry exists. Persisted to a local
 DuckDB table (same short-lived-connection-per-write pattern as
@@ -78,10 +78,10 @@ def _record(
 
 def _provider_for(class_name: str, model: str) -> str:
     """Fallback heuristic when no "provider:<name>" tag is present (e.g. a
-    manually-constructed client bypassing config.get_llm(), as in the
+    manually-constructed client bypassing llm_factory.py, as in the
     session's own smoke tests). Unreliable for OpenRouter specifically,
     since it's constructed via the same ChatOpenAI class real OpenAI would
-    use -- get_llm() always tags its clients explicitly so this path isn't
+    use -- the factory always tags its clients explicitly so this path isn't
     normally hit in production use."""
     haystack = f"{class_name} {model}".lower()
     if "anthropic" in haystack or "claude" in haystack:
@@ -99,7 +99,7 @@ def _provider_from_tags(tags) -> Optional[str]:
 
 
 class TelemetryCallback(BaseCallbackHandler):
-    """Attached once per config.get_llm() call. Records every actual LLM
+    """Attached once per LLMFactory-built client. Records every actual LLM
     invocation -- primary or fallback, whichever one really executed -- to
     the local telemetry store. A `.with_fallbacks()` runnable only invokes
     one branch per call, so exactly one on_chat_model_start/on_llm_end pair
@@ -120,12 +120,12 @@ class TelemetryCallback(BaseCallbackHandler):
         # ChatGroq or ChatAnthropic, despite the name suggesting it would).
         ctor_kwargs = serialized.get("kwargs") or {}
         model = ctor_kwargs.get("model") or ctor_kwargs.get("model_name") or ""
-        # get_llm() tags every client it builds with "provider:<name>" --
+        # llm_factory tags every client it builds with "provider:<name>" --
         # authoritative when present, since it's the only reliable signal
         # for OpenRouter (constructed via the same ChatOpenAI class real
         # OpenAI would use, so class-name/model-string sniffing can't tell
         # them apart). Falls back to the heuristic only for a client built
-        # outside get_llm().
+        # outside llm_factory.
         provider = _provider_from_tags(kwargs.get("tags")) or _provider_for(class_name, model)
         self._starts[str(run_id)] = (provider, model)
 

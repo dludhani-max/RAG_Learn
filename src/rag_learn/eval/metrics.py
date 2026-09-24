@@ -20,21 +20,13 @@ implementation plan):
 import re
 from typing import List
 
-from rag_learn import config
+from rag_learn.llm_factory import default_factory
 
-_judge_llm = None
-
-
-def _get_judge_llm():
-    global _judge_llm
-    if _judge_llm is None:
-        # max_tokens caps the requested output ceiling, not just actual
-        # generation length -- verified live: without it, a single-number
-        # judge call was rejected outright by Groq's per-minute output-token
-        # quota because the client requested room for 1573 output tokens by
-        # default, well over what a "reply with one number" response needs.
-        _judge_llm = config.get_llm(temperature=0.0, max_tokens=20, purpose="eval_judge")
-    return _judge_llm
+# max_tokens=20 caps the requested output ceiling, not just actual generation
+# length -- verified live: without it, a single-number judge call was rejected
+# outright by Groq's per-minute output-token quota because the client requested
+# room for 1573 output tokens by default, well over what a "reply with one
+# number" response needs.
 
 
 def _score_prompt(prompt: str) -> float:
@@ -43,7 +35,7 @@ def _score_prompt(prompt: str) -> float:
     (observed elsewhere this session: models don't always follow
     single-token output instructions exactly)."""
     try:
-        raw = _get_judge_llm().invoke(prompt).content.strip()
+        raw = default_factory.get("eval_judge", temperature=0.0, max_tokens=20).invoke(prompt).content.strip()
     except Exception as e:
         print(f"[ERROR] Eval judge call failed, scoring 0.0: {e}")
         return 0.0

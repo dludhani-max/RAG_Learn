@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from rag_learn import config
+from rag_learn.llm_factory import default_factory
 from rag_learn.data_loader import load_document
 from rag_learn.sync import list_indexed_documents
 
@@ -25,24 +26,15 @@ DRAFT_PATH = Path(config.VECTOR_STORE_DIR) / "eval" / "golden_dataset_draft.json
 DATASET_NAME = "rag-learn-golden"
 QUESTIONS_PER_DOC = 2
 
-_llm = None
+# Some temperature (0.3, unlike the deterministic judge calls elsewhere) --
+# these are draft questions for a human to edit, not a pass/fail
+# classification, so a bit of variety is fine. The factory suppresses reasoning
+# output (model-family-aware) and max_tokens=600 caps the ceiling -- without
+# either, this hit two real failures verified live: (1) the model's reasoning
+# preceded the JSON, breaking every single parse; (2) Groq rejected the call
+# outright (1491-2014 requested output tokens vs. a 1000/min budget) since
+# nothing capped the requested ceiling.
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-
-
-def _get_llm():
-    global _llm
-    if _llm is None:
-        # Some temperature (unlike the deterministic judge calls elsewhere)
-        # -- these are draft questions for a human to edit, not a
-        # pass/fail classification, so a bit of variety is fine.
-        # config.llm_kwargs suppresses reasoning output (model-family-aware)
-        # and caps max_tokens -- without either, this hit two real failures
-        # verified live: (1) the model's reasoning preceded the JSON,
-        # breaking every single parse; (2) Groq rejected the call outright
-        # (1491-2014 requested output tokens vs. a 1000/min budget) since
-        # nothing capped the requested ceiling.
-        _llm = config.get_llm(temperature=0.3, max_tokens=600, purpose="golden_dataset_generation")
-    return _llm
 
 
 def _strip_code_fence(text: str) -> str:
@@ -59,7 +51,7 @@ def _generate_qa_for_text(text: str, source: str, n: int) -> List[Dict[str, str]
         f"Excerpt:\n{text[:4000]}"
     )
     try:
-        raw = _get_llm().invoke(prompt).content
+        raw = default_factory.get("golden_dataset_generation", temperature=0.3, max_tokens=600).invoke(prompt).content
     except Exception as e:
         print(f"[ERROR] Golden Q&A generation failed for {source}: {e}")
         return []

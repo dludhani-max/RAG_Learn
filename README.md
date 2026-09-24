@@ -36,9 +36,9 @@ Three different jobs, three different kinds of model:
     whether what was retrieved is actually relevant, rewriting the question and retrying if not,
     writing the final answer, and checking that answer isn't fabricated or inappropriate before
     it's shown to you.
-  - `groq/compound-mini` — used only for the page-index batched section-pick call, which fires in a
+  - `openai/gpt-oss-20b` (`RAG_GROQ_BATCH_MODEL_NAME`) — used only for the page-index batched section-pick call, which fires in a
     short burst per unscoped query; a smaller/faster model here keeps that burst from becoming the
-    latency bottleneck, and it's called through a no-fallback client (`get_llm_groq_only`) since a
+    latency bottleneck, and it's called through a no-fallback client (`default_factory.get_groq_only`) since a
     bursty volume of calls would otherwise saturate a fallback tier just as badly as Groq itself.
   This Groq usage is the only part of the pipeline that costs API tokens or calls out over the
   internet. See "Guardrails" and "Vectorless retrieval" below for the full detail on each step.

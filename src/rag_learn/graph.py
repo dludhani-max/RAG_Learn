@@ -19,12 +19,12 @@ from pathlib import Path
 from typing import Any, Optional, TypedDict
 
 from langchain_core.documents import Document
-from langchain_core.runnables import Runnable
 from langgraph.graph import END, START, StateGraph
 
 from rag_learn import config, guardrails, vectorless_pageindex, vectorless_sql
 from rag_learn.cache import QACache
 from rag_learn.embedding import EmbeddingPipeline
+from rag_learn.llm_factory import default_factory
 from rag_learn.reranker import Reranker
 from rag_learn.search import Retriever
 from rag_learn.vectorstore import VectorStore
@@ -93,8 +93,6 @@ class _Clients:
     _retriever: Optional[Retriever] = None
     _reranker: Optional[Reranker] = None
     _cache: Optional[QACache] = None
-    _utility_llm: Optional[Runnable] = None
-    _generation_llm: Optional[Runnable] = None
 
     @classmethod
     def pipeline(cls) -> EmbeddingPipeline:
@@ -120,22 +118,6 @@ class _Clients:
         if cls._reranker is None:
             cls._reranker = Reranker()
         return cls._reranker
-
-    @classmethod
-    def utility_llm(cls) -> Runnable:
-        # Grading/query-rewrite are short structured tasks -- suppressing
-        # reasoning output (config.llm_kwargs, model-family-aware) skips
-        # burning output tokens on internal deliberation nobody reads for a
-        # yes/no or one-line rewrite.
-        if cls._utility_llm is None:
-            cls._utility_llm = config.get_llm(temperature=0.0, purpose="utility_grading")
-        return cls._utility_llm
-
-    @classmethod
-    def generation_llm(cls) -> Runnable:
-        if cls._generation_llm is None:
-            cls._generation_llm = config.get_llm(temperature=0.1, purpose="generation")
-        return cls._generation_llm
 
 
 # --- Nodes -----------------------------------------------------------------
@@ -301,7 +283,7 @@ def grade_documents(state: GraphState) -> dict[str, Any]:
         "(e.g. '0,2,3'). If none are relevant, reply with 'none'."
     )
     try:
-        response = _strip_think(_Clients.utility_llm().invoke(prompt).content)
+        response = _strip_think(default_factory.get("utility_grading", temperature=0.0).invoke(prompt).content)
     except Exception as e:
         # Fail open: an API outage/rate-limit here shouldn't crash the whole
         # query (verified live: an exhausted Groq quota previously propagated
@@ -333,7 +315,7 @@ def transform_query(state: GraphState) -> dict[str, Any]:
         f"Original question: {state['question']}"
     )
     try:
-        rewritten = _strip_think(_Clients.utility_llm().invoke(prompt).content).strip()
+        rewritten = _strip_think(default_factory.get("utility_grading", temperature=0.0).invoke(prompt).content).strip()
     except Exception as e:
         print(f"[ERROR] Query rewrite failed, retrying with the unmodified question: {e}")
         rewritten = ""
@@ -376,7 +358,7 @@ def generate(state: GraphState) -> dict[str, Any]:
         f"Question: {state['original_question']}\n\nAnswer:"
     )
     try:
-        answer = _strip_think(_Clients.generation_llm().invoke(prompt).content)
+        answer = _strip_think(default_factory.get("generation", temperature=0.1).invoke(prompt).content)
     except Exception as e:
         # Verified live: an exhausted Groq quota propagated as an unhandled
         # exception all the way to the Streamlit UI, rendering a raw Python

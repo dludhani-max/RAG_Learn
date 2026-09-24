@@ -18,7 +18,7 @@ st.title("📊 Insights")
 
 # --- LLM usage & cost (local telemetry, no LangSmith needed) ---------------
 # Every LLM call (both providers -- Groq primary, Anthropic fallback --
-# see config.get_llm()) is recorded locally regardless of whether LangSmith
+# see llm_factory.py) is recorded locally regardless of whether LangSmith
 # is configured, so this section renders unconditionally, before the
 # LangSmith-only sections below (which do require a key and st.stop() if
 # it's missing).
